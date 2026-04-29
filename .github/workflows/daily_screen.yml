@@ -2,8 +2,8 @@ name: Daily Stock Screen
 
 on:
   schedule:
-    # 台灣時間每日 15:30（UTC 07:30）收盤後跑
-    - cron: "30 7 * * 1-5"
+    # 台灣時間每日 08:00（UTC 00:00）開盤前傳送前日訊號
+    - cron: "0 0 * * 1-5"
   workflow_dispatch:  # 允許手動觸發
 
 jobs:
