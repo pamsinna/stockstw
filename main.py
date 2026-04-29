@@ -29,11 +29,16 @@ def main() -> None:
         ])
 
     elif mode == "download":
+        import logging
         from data.cache import init_db
         from data.universe import build_universe
         from backtest.run_backtest import download_all
         init_db()
         universe = build_universe(force_refresh=True)
+        if universe.empty or "stock_id" not in universe.columns:
+            logging.error("Universe is empty — check FINMIND_TOKEN secret")
+            sys.exit(1)
+        logging.info(f"Universe: {len(universe)} stocks")
         download_all(universe)
 
     elif mode == "optimize":
