@@ -222,6 +222,19 @@ def save_monthly_revenue(stock_id: str, df: pd.DataFrame) -> None:
     with _conn() as con:
         df[existing].to_sql("monthly_revenue", con, if_exists="append",
                             index=False, method=_insert_or_ignore)
+        con.execute(
+            "INSERT OR REPLACE INTO fetch_log VALUES (?,?,?)",
+            (stock_id, "revenue", df["date"].max())
+        )
+
+
+def last_revenue_date(stock_id: str) -> str | None:
+    with _conn() as con:
+        row = con.execute(
+            "SELECT last_date FROM fetch_log WHERE stock_id=? AND dataset='revenue'",
+            (stock_id,)
+        ).fetchone()
+    return row[0] if row else None
 
 
 def load_monthly_revenue(stock_id: str) -> pd.DataFrame:

@@ -6,7 +6,7 @@ on:
 jobs:
   bootstrap:
     runs-on: ubuntu-latest
-    timeout-minutes: 180  # 允許 3 小時（加入月營收下載後每股多一次 API call）
+    timeout-minutes: 180  # 允許 3 小時；每股 2 API calls × 6s = ~12s，3013 股需 ~4 次重跑
 
     steps:
       - name: Checkout
@@ -34,10 +34,16 @@ jobs:
             stock-db-${{ runner.os }}-bootstrap-
             stock-db-${{ runner.os }}-
 
-      - name: Download stock data
+      - name: Download price + institutional
         env:
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
         run: python main.py download
+
+      # 月營收在 price/institutional 完成後再跑（獨立可恢復）
+      - name: Download monthly revenue
+        env:
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+        run: python main.py download-revenue
 
       # if: always() 確保斷線或 timeout 後也存檔，重跑可以繼續
       - name: Save DB as cache

@@ -13,7 +13,7 @@ from tqdm import tqdm
 from data.cache import (
     init_db, load_universe, load_prices, load_institutional,
     save_prices, save_institutional, save_monthly_revenue, last_price_date,
-    load_monthly_revenue,
+    load_monthly_revenue, last_revenue_date,
 )
 from data.universe import build_universe
 from data.fetcher import fetch_price, fetch_institutional, fetch_monthly_revenue
@@ -115,7 +115,20 @@ def download_all(universe: pd.DataFrame,
             save_institutional(sid, inst)
             time.sleep(6)
 
-        rev = fetch_monthly_revenue(sid, "2018-01-01")
+
+def download_revenue(universe: pd.DataFrame,
+                     start: str = "2018-01-01",
+                     max_stocks: int | None = None) -> None:
+    """月營收獨立下載（bootstrap phase 2，主下載完成後再跑）"""
+    stocks = universe["stock_id"].tolist()
+    if max_stocks:
+        stocks = stocks[:max_stocks]
+
+    logger.info(f"Downloading monthly revenue for {len(stocks)} stocks...")
+    for sid in tqdm(stocks, desc="Revenue"):
+        if last_revenue_date(sid):  # 已有資料則跳過（斷點續跑）
+            continue
+        rev = fetch_monthly_revenue(sid, start)
         if not rev.empty:
             _normalize_and_save_revenue(sid, rev)
             time.sleep(6)
