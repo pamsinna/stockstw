@@ -6,7 +6,7 @@ on:
 jobs:
   bootstrap:
     runs-on: ubuntu-latest
-    timeout-minutes: 120  # 允許 2 小時（下載 ~200 支股票約 40-50 分鐘）
+    timeout-minutes: 180  # 允許 3 小時（加入月營收下載後每股多一次 API call）
 
     steps:
       - name: Checkout

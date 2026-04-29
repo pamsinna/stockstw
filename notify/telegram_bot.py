@@ -87,9 +87,10 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
     import os
     messages = []
 
-    long_df  = signals.get("long",  pd.DataFrame())
-    short_df = signals.get("short", pd.DataFrame())
-    swing_df = signals.get("swing", pd.DataFrame())
+    long_df    = signals.get("long",    pd.DataFrame())
+    short_df   = signals.get("short",   pd.DataFrame())
+    swing_df   = signals.get("swing",   pd.DataFrame())
+    revenue_df = signals.get("revenue", pd.DataFrame())
 
     # 超過 10 支時按市值代理排序（收盤價 × 成交量 ≈ 當日成交金額）
     # vol_ratio 是策略一的條件，對策略四的 alpha 來源無關；
@@ -146,6 +147,25 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
             )
         messages.append("\n".join(lines))
         _append_signal_log(long_df, date)
+
+    # ── 策略五：月營收動能（每月 10 日後才有，其他日子不顯示）──────────────
+    if not revenue_df.empty:
+        rev_lines = [
+            f"📊 <b>策略五：月營收動能</b>  共 {len(revenue_df)} 支",
+            f"停利 +40%  停損 -12%  最長 120 天",
+            f"<i>今為公布後第一交易日，基本面轉折訊號</i>\n",
+        ]
+        for _, row in revenue_df.head(MAX_POSITIONS).iterrows():
+            emoji = MARKET_EMOJI.get(row.get("market", "TWSE"), "⚪")
+            sid   = row["stock_id"]
+            close = row.get("close", "—")
+            rsi   = row.get("rsi", 0)
+            inst  = row.get("inst_total", 0)
+            inst_str = f"+{int(inst//1000)}K" if inst > 0 else f"{int(inst//1000)}K"
+            rev_lines.append(
+                f"{emoji} <b>{sid}</b>  ${close}  RSI{rsi:.0f}  法人{inst_str}"
+            )
+        messages.append("\n".join(rev_lines))
 
     # ── 執行紀律提醒 ──────────────────────────────────────────────────────
     messages.append(

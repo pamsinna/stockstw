@@ -12,10 +12,11 @@ from tqdm import tqdm
 
 from data.cache import (
     init_db, load_universe, load_prices, load_institutional,
-    save_prices, save_institutional, last_price_date,
+    save_prices, save_institutional, save_monthly_revenue, last_price_date,
+    load_monthly_revenue,
 )
 from data.universe import build_universe
-from data.fetcher import fetch_price, fetch_institutional
+from data.fetcher import fetch_price, fetch_institutional, fetch_monthly_revenue
 from technical.signals import STRATEGIES
 from technical.indicators import add_all, merge_institutional
 from backtest.engine import run_portfolio_backtest
@@ -27,6 +28,27 @@ from config import (
 )
 
 TAIEX_PROXY = "0050"  # ETF tracking TAIEX; used as 大盤過濾
+
+
+def _normalize_and_save_revenue(stock_id: str, raw: pd.DataFrame) -> None:
+    """FinMind 月營收欄位正規化後存入 DB。計算 revenue_yoy（若未提供）。"""
+    df = raw.copy()
+    # FinMind 可能回傳 revenue/revenue_month/revenue_year 等不同名稱
+    rename = {"Revenue": "revenue", "revenue": "revenue"}
+    for src, dst in rename.items():
+        if src in df.columns and dst not in df.columns:
+            df.rename(columns={src: dst}, inplace=True)
+
+    if "revenue" not in df.columns:
+        return
+
+    df = df.sort_values("date").reset_index(drop=True)
+    df["revenue"] = pd.to_numeric(df["revenue"], errors="coerce")
+
+    if "revenue_yoy" not in df.columns or df["revenue_yoy"].isna().all():
+        df["revenue_yoy"] = df["revenue"].pct_change(12) * 100
+
+    save_monthly_revenue(stock_id, df)
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(message)s")
@@ -93,6 +115,11 @@ def download_all(universe: pd.DataFrame,
             save_institutional(sid, inst)
             time.sleep(6)
 
+        rev = fetch_monthly_revenue(sid, "2018-01-01")
+        if not rev.empty:
+            _normalize_and_save_revenue(sid, rev)
+            time.sleep(6)
+
 
 # ─── 策略回測 ─────────────────────────────────────────────────────────────────
 
@@ -129,16 +156,23 @@ def run_all_strategies(universe: pd.DataFrame,
         price_map: dict[str, pd.DataFrame] = {}
         logger.info(f"Preparing signals for [{name}]...")
 
+        needs_rev = strategy.get("needs_revenue", False)
+
         for sid in tqdm(stocks, desc=name, leave=False):
             price = load_prices(sid, start="2018-01-01", end=end)
             if len(price) < 60:  # 資料太少跳過
                 continue
             inst = load_institutional(sid, start="2018-01-01")
+            extra: dict = {}
+            if needs_rev:
+                rev = load_monthly_revenue(sid)
+                extra["rev_df"] = rev if not rev.empty else None
             try:
                 df = signal_fn(
                     price,
                     inst_df=inst if not inst.empty else None,
                     market_filter=market_filter if not market_filter.empty else None,
+                    **extra,
                 )
                 price_map[sid] = df
             except Exception as e:

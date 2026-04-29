@@ -52,6 +52,8 @@ def run_comparison(trades_df: pd.DataFrame,
     benchmark_returns = []
     skipped = 0
 
+    hold_days_list: list[float] = []
+
     for _, trade in trades_df.iterrows():
         entry = pd.Timestamp(trade["entry_date"])
         exit_ = pd.Timestamp(trade["exit_date"])
@@ -73,12 +75,14 @@ def run_comparison(trades_df: pd.DataFrame,
 
         benchmark_returns.append(net)
         strategy_returns.append(float(str(trade["pnl_pct"])))
+        hold_days_list.append(max(float(str(trade.get("hold_days", 20))), 1))
 
     if skipped:
         logger.warning(f"Skipped {skipped} trades (no 0050 data within ±5 trading days)")
 
     strategy_arr  = np.array(strategy_returns)
     benchmark_arr = np.array(benchmark_returns)
+    hold_arr      = np.array(hold_days_list)
     alpha_arr     = strategy_arr - benchmark_arr
 
     t_stat, p_value = stats.ttest_rel(strategy_arr, benchmark_arr)
@@ -95,9 +99,23 @@ def run_comparison(trades_df: pd.DataFrame,
         "t_statistic":       t_stat,
         "p_value":           p_value,
         "is_significant":    p_value < 0.05,
+        "strategy_sharpe":   _per_trade_sharpe(strategy_arr, hold_arr),
+        "benchmark_sharpe":  _per_trade_sharpe(benchmark_arr, hold_arr),
         "strategy_returns":  strategy_arr,
         "benchmark_returns": benchmark_arr,
     }
+
+
+def _per_trade_sharpe(returns: np.ndarray, hold_days: np.ndarray) -> float:
+    """
+    把每筆報酬換算成日複利，再算年化 Sharpe。
+    這是「同等持有期」的 Sharpe，可以和 0050 公平比較。
+    """
+    daily = (1 + returns) ** (1.0 / hold_days) - 1
+    std = daily.std()
+    if std == 0 or np.isnan(std):
+        return float("nan")
+    return float(daily.mean() / std * np.sqrt(252))
 
 
 def _nearest_row(etf: pd.DataFrame, date: pd.Timestamp,
@@ -137,6 +155,11 @@ def print_report(result: dict) -> None:
 
   統計顯著性
     t = {result['t_statistic']:.3f}, p = {p:.4f}（{sig}）
+
+  Sharpe ratio（年化，以每筆日複利計）
+    策略四 Sharpe：  {result['strategy_sharpe']:.3f}
+    0050 Sharpe：    {result['benchmark_sharpe']:.3f}
+    {'✅ 策略 Sharpe 較高（同報酬下波動較小）' if result['strategy_sharpe'] > result['benchmark_sharpe'] else '❌ 策略 Sharpe 未優於 0050'}
 
 {'='*60}""")
 

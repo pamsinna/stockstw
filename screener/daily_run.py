@@ -12,7 +12,7 @@ import pandas as pd
 from tqdm import tqdm
 
 from data.cache import (
-    init_db, load_universe, load_prices, load_institutional,
+    init_db, load_universe, load_prices, load_institutional, load_monthly_revenue,
     save_prices, save_institutional, last_price_date,
 )
 from data.universe import build_universe
@@ -24,6 +24,7 @@ from technical.signals import (
     signal_swing_ma_kd_inst,
     signal_swing_dual_inst,
     signal_longterm_quality_entry,
+    signal_revenue_momentum,
 )
 
 logger = logging.getLogger(__name__)
@@ -70,7 +71,7 @@ def screen_today(universe: pd.DataFrame,
     回傳 {timeframe: DataFrame of signals today}
     timeframe: "short", "swing", "long"
     """
-    results: dict[str, list] = {"short": [], "swing": [], "long": []}
+    results: dict[str, list] = {"short": [], "swing": [], "long": [], "revenue": []}
     market_map = dict(zip(universe["stock_id"], universe["market"]))
 
     # 大盤過濾：今天是否多頭趨勢
@@ -127,6 +128,13 @@ def screen_today(universe: pd.DataFrame,
                 if bool(df_l.iloc[-1]["signal_long"]):
                     results["long"].append(_summary_row(sid, market, df_l, "long"))
 
+            # 策略五：月營收動能（每月 10 日後第一個交易日才會有訊號）
+            rev = load_monthly_revenue(sid)
+            rev_arg = rev if not rev.empty else None
+            df_rv = signal_revenue_momentum(price, inst_arg, rev_arg, market_filter=mf)
+            if bool(df_rv.iloc[-1]["signal_rev"]):
+                results["revenue"].append(_summary_row(sid, market, df_rv, "revenue"))
+
         except Exception as e:
             logger.debug(f"{sid}: {e}")
 
@@ -145,7 +153,9 @@ def _summary_row(stock_id: str, market: str,
         "market":    market,
         "timeframe": timeframe,
         "close":     round(float(last.get("close", 0)), 2),
+        "volume":    float(last.get("volume", 0)),
         "vol_ratio": round(float(last.get("vol_ratio", 0)), 2),
+        "bb_pct":    round(float(last.get("bb_pct", float("nan"))), 3),
         "kd_k":      round(float(last.get("kd_k", 0)), 1),
         "rsi":       round(float(last.get("rsi", 0)), 1),
         "ma_aligned":bool(last.get("ma_aligned", False)),
