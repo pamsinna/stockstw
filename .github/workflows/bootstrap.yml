@@ -24,20 +24,33 @@ jobs:
       - name: Create dirs
         run: mkdir -p reports data
 
+      # 先嘗試還原上一次的部分進度（讓重跑時跳過已下載的股票）
+      - name: Restore previous DB (if any)
+        uses: actions/cache/restore@v4
+        with:
+          path: data/cache.db
+          key: stock-db-${{ runner.os }}-bootstrap-never-match
+          restore-keys: |
+            stock-db-${{ runner.os }}-bootstrap-
+            stock-db-${{ runner.os }}-
+
       - name: Download stock data
         env:
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
         run: python main.py download
 
+      # if: always() 確保斷線或 timeout 後也存檔，重跑可以繼續
       - name: Save DB as cache
+        if: always()
         uses: actions/cache/save@v4
         with:
           path: data/cache.db
           key: stock-db-${{ runner.os }}-bootstrap-${{ github.run_number }}
 
       - name: Upload DB as artifact (備份)
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: cache-db-bootstrap
+          name: cache-db-bootstrap-${{ github.run_number }}
           path: data/cache.db
           retention-days: 30
