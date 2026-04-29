@@ -137,15 +137,22 @@ def signal_revenue_momentum(
     market_filter: pd.Series | None = None,
 ) -> pd.DataFrame:
     """
-    策略五：月營收 YoY 加速 + 外資確認
+    策略五：月營收 YoY 加速 + 外資確認（基本面轉折因子）
 
-    訊號只在每月 10 日（營收公布日）後的「第一個」交易日觸發，
-    以確保資料已公開、且每月只進場一次（避免同一份資料重複觸發）。
+    訊號只在每月 11 日（公布日保守估計）後的「第一個」交易日觸發。
+    11 日而非 10 日：部分公司在 10 日傍晚才公布，11 日確保全市場資料可用。
 
     進場條件（全部滿足）：
-      基本面：YoY > 20%，YoY 加速 > 10pp，過去 12 個月 ≥ 8 個月正成長
-      籌碼：近 20 日外資累計買超 > 0
-      技術：收盤 > MA60 或近 20 日跌幅 < -10%（不在崩跌中）
+      基本面：
+        1. YoY > 20%
+        2. 加速 > 10pp（vs 前 3 個月平均）
+        3. 過去 12 個月 ≥ 8 個月正成長
+        4. 2 年 CAGR > 5%（消除基期效應，排除「去年太爛所以今年高 YoY」）
+      籌碼：
+        5. 近 20 日外資累計買超 > 近 20 日均量的 0.5%（相對強度，避免大型股雜訊）
+      技術：
+        6. 站上 MA60，或（近 5 日跌幅 > -8% 且收盤 > 5 日低點）
+           排除正在崩跌中的股票，但允許短暫回測後尚未站回 MA60 的
     """
     df = add_all(df).copy()
     df["signal_rev"] = False
@@ -154,71 +161,86 @@ def signal_revenue_momentum(
         return df
 
     rev = rev_df.sort_values("date").copy()
+    rev["revenue"] = pd.to_numeric(rev["revenue"], errors="coerce")
 
-    # ── 計算 YoY ───────────────────────────────────────────────────────────────
+    # ── 計算 YoY（百分比，如 20 = 20%）────────────────────────────────────────
     if "revenue_yoy" in rev.columns and not rev["revenue_yoy"].isna().all():
         rev["yoy"] = pd.to_numeric(rev["revenue_yoy"], errors="coerce")
     else:
         rev["yoy"] = rev["revenue"].pct_change(12) * 100
 
-    # 3 個月平均 YoY（用前 3 個月，不含當月，避免前視偏差）
+    # 3 個月平均 YoY（不含當月，避免前視偏差）
     rev["yoy_3m_avg"] = rev["yoy"].shift(1).rolling(3, min_periods=2).mean()
     rev["yoy_accel"]  = rev["yoy"] - rev["yoy_3m_avg"]
 
     # 過去 12 個月正成長月數
     rev["consistency"] = (rev["yoy"] > 0).astype(int).rolling(12, min_periods=6).sum()
 
-    # ── 公布日（月末 +1 個月取第 10 日）──────────────────────────────────────
+    # 2 年 CAGR：消除基期效應（NaN 時不過濾，讓基本面其他條件決定）
+    rev["rev_lag24"] = rev["revenue"].shift(24)
+    rev["cagr_2y"] = (rev["revenue"] / rev["rev_lag24"]) ** 0.5 - 1
+
+    # ── 公布日：統一用次月 11 日（保守，包含所有公司）────────────────────────
     def _pub(d: pd.Timestamp) -> pd.Timestamp:
         y, m = d.year, d.month
         if m == 12:
-            return pd.Timestamp(y + 1, 1, 10)
-        return pd.Timestamp(y, m + 1, 10)
+            return pd.Timestamp(y + 1, 1, 11)
+        return pd.Timestamp(y, m + 1, 11)
 
     rev["publish_date"] = rev["date"].apply(_pub)
 
-    # ── 營收條件通過的公布日集合 ─────────────────────────────────────────────
+    # ── 所有四條基本面條件通過的公布日 ───────────────────────────────────────
+    cagr_ok = rev["cagr_2y"].isna() | (rev["cagr_2y"] > 0.05)
     rev_ok = rev[
         (rev["yoy"] > 20) &
         (rev["yoy_accel"] > 10) &
-        (rev["consistency"] >= 8)
+        (rev["consistency"] >= 8) &
+        cagr_ok
     ]["publish_date"].tolist()
 
     if not rev_ok:
         return _apply_market_filter(df, "signal_rev", market_filter)
 
-    # ── 法人：近 20 日外資累計買超 ───────────────────────────────────────────
-    if inst_df is not None and not inst_df.empty:
+    # ── 法人：外資 20 日累計買超 > 均量 0.5%（相對強度）────────────────────
+    has_inst = inst_df is not None and not inst_df.empty
+    if has_inst:
         df = merge_institutional(df, inst_df)
-        if "foreign_" in df.columns:
-            df["_foreign_20d"] = df["foreign_"].rolling(20, min_periods=5).sum()
-        else:
-            df["_foreign_20d"] = 0.0
+    if has_inst and "foreign_" in df.columns:
+        df["_foreign_20d"] = df["foreign_"].rolling(20, min_periods=5).sum()
+        # volume 單位是股，foreign_ 是張（1 張 = 1000 股），統一為張
+        df["_vol_20d_avg"] = df["volume"].rolling(20, min_periods=5).mean() / 1000
+        df["_inst_threshold"] = df["_vol_20d_avg"] * 0.005  # 均量 0.5%
     else:
-        df["_foreign_20d"] = 0.0
+        df["_foreign_20d"]    = 0.0
+        df["_inst_threshold"] = -1.0  # 無資料時放行（-1 確保 > 永遠成立）
 
-    # ── 技術面：不在崩跌中 ───────────────────────────────────────────────────
-    df["_ret_20d"] = df["close"] / df["close"].shift(20) - 1
-    cond_tech = (df["close"] > df["ma60"]) | (df["_ret_20d"] > -0.10)
+    # ── 技術面：站上 MA60，或近 5 日不崩跌且已止跌 ──────────────────────────
+    df["_ret_5d"]    = df["close"] / df["close"].shift(5) - 1
+    df["_low_5d"]    = df["low"].rolling(5).min()
+    cond_above_ma60  = df["close"] > df["ma60"]
+    cond_not_crash   = df["_ret_5d"] > -0.08  # 近 5 日沒跌超過 8%
+    cond_bouncing    = df["close"] > df["_low_5d"]  # 收盤高於 5 日最低（止跌）
+    cond_tech = cond_above_ma60 | (cond_not_crash & cond_bouncing)
 
-    # ── 對應到第一個交易日 ────────────────────────────────────────────────────
-    price_dates = df["date"].sort_values().values  # numpy datetime64 array
-
+    # ── 對應到第一個交易日（11 日後）────────────────────────────────────────
     for pub in rev_ok:
         pub_ts = pd.Timestamp(pub)
-        # 找公布日後第一個有價格資料的交易日
         candidates = df[df["date"] >= pub_ts]
         if candidates.empty:
             continue
         signal_day = candidates.iloc[0]["date"]
         day_mask = df["date"] == signal_day
 
-        tech_ok  = cond_tech[day_mask].any()
-        inst_ok  = (df.loc[day_mask, "_foreign_20d"] > 0).any() or (df["_foreign_20d"] == 0).all()
+        tech_ok = bool(cond_tech[day_mask].any())
+        inst_ok = bool(
+            (df.loc[day_mask, "_foreign_20d"] >=
+             df.loc[day_mask, "_inst_threshold"]).any()
+        )
         if tech_ok and inst_ok:
             df.loc[day_mask, "signal_rev"] = True
 
-    df.drop(columns=["_foreign_20d", "_ret_20d"], errors="ignore", inplace=True)
+    df.drop(columns=["_foreign_20d", "_inst_threshold", "_vol_20d_avg",
+                      "_ret_5d", "_low_5d"], errors="ignore", inplace=True)
     return _apply_market_filter(df, "signal_rev", market_filter)
 
 

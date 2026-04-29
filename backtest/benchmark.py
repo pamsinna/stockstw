@@ -156,10 +156,12 @@ def print_report(result: dict) -> None:
   統計顯著性
     t = {result['t_statistic']:.3f}, p = {p:.4f}（{sig}）
 
-  Sharpe ratio（年化，以每筆日複利計）
+  Sharpe（每筆日複利，配對比較）
     策略四 Sharpe：  {result['strategy_sharpe']:.3f}
     0050 Sharpe：    {result['benchmark_sharpe']:.3f}
-    {'✅ 策略 Sharpe 較高（同報酬下波動較小）' if result['strategy_sharpe'] > result['benchmark_sharpe'] else '❌ 策略 Sharpe 未優於 0050'}
+    {'✅ 策略 Sharpe 較高（同持有期下波動更小）' if result['strategy_sharpe'] > result['benchmark_sharpe'] else '❌ 策略 Sharpe 未優於 0050'}
+    ⚠️  注意：以上為「交易層級」Sharpe，兩邊用同持有天數換算日報酬再比，
+        適合看「停損機制是否有效降低波動」，但非標準帳戶 Sharpe。
 
 {'='*60}""")
 
@@ -187,6 +189,62 @@ def print_report(result: dict) -> None:
 
 def _print_yearly_breakdown(result: dict) -> None:
     pass  # 分段資訊需要 trades_df，由 main() 傳入
+
+
+def account_level_sharpe(trades_df: pd.DataFrame,
+                          etf_df: pd.DataFrame) -> None:
+    """
+    帳戶層級 Sharpe（等權重日報酬序列）— 更標準的比較方式。
+
+    策略：每個交易日，計算「所有當前持倉」的等權重日報酬。
+          無持倉日 = 0% 日報酬（現金）。
+    0050：同一段期間 Buy-and-Hold 的日報酬。
+    """
+    etf = etf_df.set_index("date").sort_index()
+    etf.index = pd.to_datetime(etf.index)
+    etf["daily_ret"] = etf["close"].pct_change()
+
+    if trades_df.empty:
+        return
+
+    start = pd.to_datetime(trades_df["entry_date"].min())
+    end   = pd.to_datetime(trades_df["exit_date"].max())
+    all_dates = etf.index[(etf.index >= start) & (etf.index <= end)]
+
+    # 每個日期，算策略的等權重日報酬
+    strategy_daily: list[float] = []
+    for dt in all_dates:
+        active = trades_df[
+            (pd.to_datetime(trades_df["entry_date"]) <= dt) &
+            (pd.to_datetime(trades_df["exit_date"])  >= dt)
+        ]
+        if active.empty:
+            strategy_daily.append(0.0)
+            continue
+        # 用 0050 當日報酬代理每筆持倉的當日報酬（簡化；有完整日 K 時可換）
+        raw = etf.loc[dt, "daily_ret"] if dt in etf.index else 0.0
+        etf_ret = float(raw) if raw is not None else 0.0  # type: ignore[arg-type]
+        strategy_daily.append(etf_ret)
+
+    strat_arr: np.ndarray = np.array(strategy_daily, dtype=float)
+    etf_arr:   np.ndarray = np.array(
+        etf.loc[all_dates, "daily_ret"].fillna(0).tolist(), dtype=float
+    )
+
+    def _ann_sharpe(rets: np.ndarray) -> float:
+        std = float(rets.std())
+        return float(rets.mean()) / std * np.sqrt(252) if std > 0 else float("nan")
+
+    s_sharpe = _ann_sharpe(strat_arr)
+    e_sharpe = _ann_sharpe(etf_arr)
+
+    print(f"""
+  帳戶層級 Sharpe（日報酬序列，{len(all_dates)} 個交易日）
+    策略四帳戶 Sharpe：{s_sharpe:.3f}
+    0050 買持 Sharpe：{e_sharpe:.3f}
+    說明：帳戶層級使用 0050 日報酬代理持倉報酬（精確計算需個股日 K）
+          核心結論仍看上方「交易層級 Sharpe」為準。
+""")
 
 
 def yearly_breakdown(trades_df: pd.DataFrame,
