@@ -36,6 +36,7 @@ def calc_fundamentals(stock_id: str) -> dict:
     }
 
     if fin.empty:
+        result["passes_filter"] = True  # 無財報資料時不過濾，讓技術面決定
         return result
 
     try:
