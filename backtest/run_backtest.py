@@ -46,16 +46,24 @@ def _ensure_taiex_proxy(start: str = "2018-01-01") -> None:
 
 def build_market_filter(start: str, end: str, ma_period: int = 60) -> pd.Series:
     """
-    回傳 date-indexed bool Series：True = 大盤多頭（0050 收盤 > MA60）
-    策略訊號只在此為 True 時才生效。
+    大盤過濾（寬鬆版）：
+      多頭 = 收盤 > MA60
+      OR  收盤雖跌破 MA60，但 MA20 開始上揚（V 轉初期也允許進場）
+    避免純 MA60 在 V 轉時錯過最佳買點。
     """
     df = load_prices(TAIEX_PROXY, start="2018-01-01", end=end)
     if len(df) < ma_period:
         logger.warning("0050 data insufficient for market filter — filter disabled")
         return pd.Series(dtype=bool)
     df = df.sort_values("date").reset_index(drop=True)
-    df["ma"] = df["close"].rolling(ma_period).mean()
-    df["market_up"] = df["close"] > df["ma"]
+    df["ma60"] = df["close"].rolling(60).mean()
+    df["ma20"] = df["close"].rolling(20).mean()
+    df["ma20_rising"] = df["ma20"] > df["ma20"].shift(5)  # MA20 比 5 日前高
+
+    above_ma60   = df["close"] > df["ma60"]
+    v_turn_early = df["ma20_rising"] & (df["close"] > df["ma20"])
+
+    df["market_up"] = above_ma60 | v_turn_early
     return df.set_index("date")["market_up"]
 
 
