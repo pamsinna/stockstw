@@ -151,8 +151,8 @@ def signal_revenue_momentum(
       籌碼：
         5. 近 20 日外資累計買超 > 近 20 日均量的 0.5%（相對強度，避免大型股雜訊）
       技術：
-        6. 站上 MA60，或（近 5 日跌幅 > -8% 且收盤 > 5 日低點）
-           排除正在崩跌中的股票，但允許短暫回測後尚未站回 MA60 的
+        6. 站上 MA60，或（近 5 日跌幅 > -8% 且當日收紅K）
+           排除正在崩跌中的股票；當日紅K確認有買盤進來，不是盲目逢低接
     """
     df = add_all(df).copy()
     df["signal_rev"] = False
@@ -215,12 +215,11 @@ def signal_revenue_momentum(
         df["_inst_threshold"] = -1.0  # 無資料時放行（-1 確保 > 永遠成立）
 
     # ── 技術面：站上 MA60，或近 5 日不崩跌且已止跌 ──────────────────────────
-    df["_ret_5d"]    = df["close"] / df["close"].shift(5) - 1
-    df["_low_5d"]    = df["low"].rolling(5).min()
-    cond_above_ma60  = df["close"] > df["ma60"]
-    cond_not_crash   = df["_ret_5d"] > -0.08  # 近 5 日沒跌超過 8%
-    cond_bouncing    = df["close"] > df["_low_5d"]  # 收盤高於 5 日最低（止跌）
-    cond_tech = cond_above_ma60 | (cond_not_crash & cond_bouncing)
+    df["_ret_5d"]   = df["close"] / df["close"].shift(5) - 1
+    cond_above_ma60 = df["close"] > df["ma60"]
+    cond_not_crash  = df["_ret_5d"] > -0.08        # 近 5 日沒跌超過 8%
+    cond_red_candle = df["close"] > df["open"]      # 當日收紅K（有買盤進來）
+    cond_tech = cond_above_ma60 | (cond_not_crash & cond_red_candle)
 
     # ── 對應到第一個交易日（11 日後）────────────────────────────────────────
     for pub in rev_ok:
@@ -240,7 +239,7 @@ def signal_revenue_momentum(
             df.loc[day_mask, "signal_rev"] = True
 
     df.drop(columns=["_foreign_20d", "_inst_threshold", "_vol_20d_avg",
-                      "_ret_5d", "_low_5d"], errors="ignore", inplace=True)
+                      "_ret_5d"], errors="ignore", inplace=True)
     return _apply_market_filter(df, "signal_rev", market_filter)
 
 
