@@ -91,9 +91,16 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
     short_df = signals.get("short", pd.DataFrame())
     swing_df = signals.get("swing", pd.DataFrame())
 
-    # 超過 10 支時按 vol_ratio（流動性代理）排序，不用 RSI
+    # 超過 10 支時按市值代理排序（收盤價 × 成交量 ≈ 當日成交金額）
+    # vol_ratio 是策略一的條件，對策略四的 alpha 來源無關；
+    # 成交金額最大的流動性最穩，避免大部位卡在小型股
     if not long_df.empty and len(long_df) > MAX_POSITIONS:
-        long_df = long_df.sort_values("vol_ratio", ascending=False)
+        if "volume" in long_df.columns and "close" in long_df.columns:
+            long_df = long_df.assign(
+                _turnover=long_df["close"] * long_df["volume"]
+            ).sort_values("_turnover", ascending=False).drop(columns="_turnover")
+        else:
+            long_df = long_df.sample(frac=1, random_state=42)  # 隨機（統計最乾淨）
 
     # ── Header ────────────────────────────────────────────────────────────
     header = (
@@ -121,7 +128,7 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
         lines = [
             f"🏔 <b>中長線（主力）</b>  共 {len(long_df)} 支",
             f"停利 +30%  停損 -10%  最長 90 天",
-            f"<i>超過 10 支時取成交量最高者</i>\n",
+            f"<i>超過 10 支時取成交金額最高者（流動性優先）</i>\n",
         ]
         for _, row in long_df.head(MAX_POSITIONS).iterrows():
             emoji = MARKET_EMOJI.get(row.get("market", "TWSE"), "⚪")
@@ -129,12 +136,13 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
             close = row.get("close", "—")
             kd    = row.get("kd_k", 0)
             rsi   = row.get("rsi", 0)
-            vr    = row.get("vol_ratio", 0)
+            bb    = row.get("bb_pct", float("nan"))
             inst  = row.get("inst_total", 0)
             inst_str = f"+{int(inst//1000)}K" if inst > 0 else f"{int(inst//1000)}K"
+            bb_str = f"{bb*100:.0f}%" if not pd.isna(bb) else "—"
             lines.append(
                 f"{emoji} <b>{sid}</b>  ${close}  "
-                f"量{vr:.1f}x  KD{kd:.0f}  RSI{rsi:.0f}  法人{inst_str}"
+                f"BB{bb_str}  KD{kd:.0f}  RSI{rsi:.0f}  法人{inst_str}"
             )
         messages.append("\n".join(lines))
         _append_signal_log(long_df, date)
