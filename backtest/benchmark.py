@@ -41,6 +41,9 @@ def run_comparison(trades_df: pd.DataFrame,
     """
     配對比較：每筆策略交易 vs 同期持有 0050。
     進場用開盤價，出場用收盤價（與策略回測口徑接近）。
+
+    注意：skip 條件只看「找不到對應交易日」，不比較價格高低，
+    否則 0050 下跌的區間會被錯誤濾掉，造成對照組嚴重偏高。
     """
     etf = etf_df.set_index("date")
     etf.index = pd.to_datetime(etf.index)
@@ -53,22 +56,26 @@ def run_comparison(trades_df: pd.DataFrame,
         entry = pd.Timestamp(trade["entry_date"])
         exit_ = pd.Timestamp(trade["exit_date"])
 
-        # 找最近的有效交易日（假日可能沒資料）
-        entry_row = _nearest_row(etf, entry, "open", direction="forward")
-        exit_row  = _nearest_row(etf, exit_,  "close", direction="backward")
+        entry_date_matched, entry_price = _nearest_row(etf, entry, "open",  "forward")
+        exit_date_matched,  exit_price  = _nearest_row(etf, exit_, "close", "backward")
 
-        if entry_row is None or exit_row is None or entry_row >= exit_row:
+        # 只在找不到有效交易日，或出場日早於進場日時跳過
+        if (entry_price is None or exit_price is None
+                or entry_date_matched is None or exit_date_matched is None):
+            skipped += 1
+            continue
+        if exit_date_matched < entry_date_matched:
             skipped += 1
             continue
 
-        gross = (exit_row - entry_row) / entry_row
+        gross = (exit_price - entry_price) / entry_price
         net   = gross - COST_PER_TRADE
 
         benchmark_returns.append(net)
-        strategy_returns.append(float(trade["pnl_pct"]))
+        strategy_returns.append(float(str(trade["pnl_pct"])))
 
     if skipped:
-        logger.warning(f"Skipped {skipped} trades (0050 data missing for that date)")
+        logger.warning(f"Skipped {skipped} trades (no 0050 data within ±5 trading days)")
 
     strategy_arr  = np.array(strategy_returns)
     benchmark_arr = np.array(benchmark_returns)
@@ -77,30 +84,30 @@ def run_comparison(trades_df: pd.DataFrame,
     t_stat, p_value = stats.ttest_rel(strategy_arr, benchmark_arr)
 
     return {
-        "n_trades":       len(strategy_arr),
-        "strategy_mean":  strategy_arr.mean(),
-        "benchmark_mean": benchmark_arr.mean(),
-        "alpha_mean":     alpha_arr.mean(),
-        "alpha_std":      alpha_arr.std(),
-        "alpha_win_rate": (alpha_arr > 0).mean(),
+        "n_trades":          len(strategy_arr),
+        "strategy_mean":     strategy_arr.mean(),
+        "benchmark_mean":    benchmark_arr.mean(),
+        "alpha_mean":        alpha_arr.mean(),
+        "alpha_std":         alpha_arr.std(),
+        "alpha_win_rate":    (alpha_arr > 0).mean(),
         "strategy_win_rate": (strategy_arr > 0).mean(),
-        "benchmark_win_rate": (benchmark_arr > 0).mean(),
-        "t_statistic":    t_stat,
-        "p_value":        p_value,
-        "is_significant": p_value < 0.05,
+        "benchmark_win_rate":(benchmark_arr > 0).mean(),
+        "t_statistic":       t_stat,
+        "p_value":           p_value,
+        "is_significant":    p_value < 0.05,
         "strategy_returns":  strategy_arr,
         "benchmark_returns": benchmark_arr,
     }
 
 
 def _nearest_row(etf: pd.DataFrame, date: pd.Timestamp,
-                 col: str, direction: str) -> float | None:
-    """找最近有效交易日的價格，最多漂移 5 天"""
+                 col: str, direction: str) -> tuple[pd.Timestamp | None, float | None]:
+    """找最近有效交易日的日期與價格，最多漂移 5 天。回傳 (date, price)。"""
     for delta in range(6):
         d = date + pd.Timedelta(days=delta if direction == "forward" else -delta)
         if d in etf.index:
-            return float(etf.loc[d, col])
-    return None
+            return d, float(etf.loc[d, col])  # type: ignore[arg-type]
+    return None, None
 
 
 def print_report(result: dict) -> None:
