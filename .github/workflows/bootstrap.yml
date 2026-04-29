@@ -1,0 +1,43 @@
+name: Bootstrap DB (run once)
+
+on:
+  workflow_dispatch:  # 只能手動觸發，不自動跑
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120  # 允許 2 小時（下載 ~200 支股票約 40-50 分鐘）
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create dirs
+        run: mkdir -p reports data
+
+      - name: Download stock data
+        env:
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+        run: python main.py download
+
+      - name: Save DB as cache
+        uses: actions/cache/save@v4
+        with:
+          path: data/cache.db
+          key: stock-db-${{ runner.os }}-bootstrap-${{ github.run_number }}
+
+      - name: Upload DB as artifact (備份)
+        uses: actions/upload-artifact@v4
+        with:
+          name: cache-db-bootstrap
+          path: data/cache.db
+          retention-days: 30

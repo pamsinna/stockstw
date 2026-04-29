@@ -78,12 +78,12 @@ def download_all(universe: pd.DataFrame,
         price = fetch_price(sid, fetch_start)
         if not price.empty:
             save_prices(sid, price)
-        time.sleep(6)  # 600 req/hr = 每 6 秒 1 req
+            time.sleep(6)  # 只有成功取得資料才 sleep（403 直接跳過，無需等待）
 
         inst = fetch_institutional(sid, fetch_start)
         if not inst.empty:
             save_institutional(sid, inst)
-        time.sleep(6)
+            time.sleep(6)
 
 
 # ─── 策略回測 ─────────────────────────────────────────────────────────────────
