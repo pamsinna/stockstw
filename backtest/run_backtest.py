@@ -131,7 +131,7 @@ def download_revenue(universe: pd.DataFrame,
         rev = fetch_monthly_revenue(sid, start)
         if not rev.empty:
             _normalize_and_save_revenue(sid, rev)
-            time.sleep(6)
+        time.sleep(6)  # 不管有無資料都限速，避免爆掉 600 req/hr
 
 
 # ─── 策略回測 ─────────────────────────────────────────────────────────────────
