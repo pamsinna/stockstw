@@ -45,6 +45,11 @@ jobs:
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
         run: python main.py download-revenue
 
+      # 確保 Python 完全停止再打包（避免 SQLite 寫到一半被 tar 讀到）
+      - name: Wait for Python to stop
+        if: always()
+        run: pkill -f "python main.py" || true; sleep 5
+
       # if: always() 確保斷線或 timeout 後也存檔，重跑可以繼續
       - name: Save DB as cache
         if: always()
