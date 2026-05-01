@@ -96,7 +96,7 @@ def download_all(universe: pd.DataFrame,
     _ensure_taiex_proxy(start)
     time.sleep(6)
 
-    stocks = universe["stock_id"].tolist()
+    stocks = sorted(universe["stock_id"].tolist())  # 固定排序，確保斷點續跑順序一致
     if max_stocks:
         stocks = stocks[:max_stocks]
 
@@ -120,7 +120,7 @@ def download_revenue(universe: pd.DataFrame,
                      start: str = "2018-01-01",
                      max_stocks: int | None = None) -> None:
     """月營收獨立下載（bootstrap phase 2，主下載完成後再跑）"""
-    stocks = universe["stock_id"].tolist()
+    stocks = sorted(universe["stock_id"].tolist())  # 固定排序，確保斷點續跑順序一致
     if max_stocks:
         stocks = stocks[:max_stocks]
 
