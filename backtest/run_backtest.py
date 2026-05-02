@@ -126,9 +126,9 @@ def download_revenue(universe: pd.DataFrame,
 
     logger.info(f"Downloading monthly revenue for {len(stocks)} stocks...")
     for sid in tqdm(stocks, desc="Revenue"):
-        if last_revenue_date(sid):  # 已有資料則跳過（斷點續跑）
-            continue
-        rev = fetch_monthly_revenue(sid, start)
+        last = last_revenue_date(sid)
+        fetch_start = last or start
+        rev = fetch_monthly_revenue(sid, fetch_start)
         if not rev.empty:
             _normalize_and_save_revenue(sid, rev)
         time.sleep(6)  # 不管有無資料都限速，避免爆掉 600 req/hr
