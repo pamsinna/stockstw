@@ -13,11 +13,11 @@ from tqdm import tqdm
 
 from data.cache import (
     init_db, load_universe, load_prices, load_institutional, load_monthly_revenue,
-    save_prices, save_institutional, last_price_date,
+    save_prices, save_institutional, last_price_date, last_revenue_date,
 )
 from data.universe import build_universe
-from data.fetcher import fetch_price, fetch_institutional
-from backtest.run_backtest import build_market_filter
+from data.fetcher import fetch_price, fetch_institutional, fetch_monthly_revenue
+from backtest.run_backtest import build_market_filter, _normalize_and_save_revenue
 from fundamental.quality_filter import batch_fundamentals
 from technical.signals import (
     signal_short_vol_breakout,
@@ -63,6 +63,25 @@ def incremental_update(universe: pd.DataFrame, sleep_sec: float = 6.0) -> None:
         if not inst.empty:
             save_institutional(sid, inst)
         time.sleep(sleep_sec)
+
+    # 月營收每月只公布一次（10 日左右），11 日後才開始補抓；
+    # 只挑「最後一筆營收 ≥ 35 天前」的股票，避免每日浪費 3000+ API 額度。
+    today = datetime.today()
+    if today.day >= 11:
+        stale_before = (today - timedelta(days=35)).strftime("%Y-%m-%d")
+        rev_targets = [
+            sid for sid in stocks_to_update
+            if (last_revenue_date(sid) or "2018-01-01") < stale_before
+        ]
+        if rev_targets:
+            logger.info(f"Refreshing monthly revenue for {len(rev_targets)} stocks "
+                        f"(stale before {stale_before})...")
+            for sid in tqdm(rev_targets, desc="Revenue"):
+                fetch_start = last_revenue_date(sid) or "2018-01-01"
+                rev = fetch_monthly_revenue(sid, fetch_start)
+                if not rev.empty:
+                    _normalize_and_save_revenue(sid, rev)
+                time.sleep(sleep_sec)
 
 
 def screen_today(universe: pd.DataFrame,
