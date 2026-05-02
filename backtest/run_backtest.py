@@ -33,13 +33,21 @@ TAIEX_PROXY = "0050"  # ETF tracking TAIEX; used as 大盤過濾
 def _normalize_and_save_revenue(stock_id: str, raw: pd.DataFrame) -> None:
     """FinMind 月營收欄位正規化後存入 DB。計算 revenue_yoy（若未提供）。"""
     df = raw.copy()
-    # FinMind 可能回傳 revenue/revenue_month/revenue_year 等不同名稱
-    rename = {"Revenue": "revenue", "revenue": "revenue"}
+    # FinMind 可能回傳 revenue/revenue_month/monthly_revenue 等不同名稱
+    rename = {
+        "Revenue": "revenue",
+        "revenue_month": "revenue",
+        "monthly_revenue": "revenue",
+    }
     for src, dst in rename.items():
         if src in df.columns and dst not in df.columns:
             df.rename(columns={src: dst}, inplace=True)
 
     if "revenue" not in df.columns:
+        logger.warning(
+            f"{stock_id}: revenue column missing from FinMind response "
+            f"(got columns: {list(df.columns)}); skipping save"
+        )
         return
 
     df = df.sort_values("date").reset_index(drop=True)
