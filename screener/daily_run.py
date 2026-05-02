@@ -5,14 +5,15 @@
 3. 分三個時間框架輸出當日訊號清單，並套用大盤過濾
 """
 import logging
-import time
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 from tqdm import tqdm
 
+from config import DATA_START
 from data.cache import (
-    init_db, load_universe, load_prices, load_institutional, load_monthly_revenue,
+    init_db, load_prices, load_institutional, load_monthly_revenue,
     save_prices, save_institutional, last_price_date, last_revenue_date,
 )
 from data.universe import build_universe
@@ -29,15 +30,16 @@ from technical.signals import (
 
 logger = logging.getLogger(__name__)
 
+_TZ = ZoneInfo("Asia/Taipei")
 TAIEX_PROXY = "0050"
 
 
-def incremental_update(universe: pd.DataFrame, sleep_sec: float = 6.0) -> None:
+def incremental_update(universe: pd.DataFrame) -> None:
     """
     只更新 DB 中已有歷史資料的股票 + 0050（大盤代理）
     新股第一次下載需執行 download 模式
     """
-    yesterday = (datetime.today() - timedelta(days=1)).strftime("%Y-%m-%d")
+    yesterday = (datetime.now(_TZ) - timedelta(days=1)).strftime("%Y-%m-%d")
 
     all_stocks = universe["stock_id"].tolist()
     stocks_to_update = [
@@ -50,38 +52,35 @@ def incremental_update(universe: pd.DataFrame, sleep_sec: float = 6.0) -> None:
                 f"(out of {len(all_stocks)} in universe)...")
 
     for sid in tqdm(stocks_to_update, desc="Update"):
-        last = last_price_date(sid) or "2018-01-01"
+        last = last_price_date(sid) or DATA_START
         if last >= yesterday:
             continue
 
-        price = fetch_price(sid, last)
+        price = fetch_price(sid, last)  # rate-limited inside _finmind()
         if not price.empty:
             save_prices(sid, price)
-        time.sleep(sleep_sec)
 
-        inst = fetch_institutional(sid, last)
+        inst = fetch_institutional(sid, last)  # rate-limited inside _finmind()
         if not inst.empty:
             save_institutional(sid, inst)
-        time.sleep(sleep_sec)
 
     # 月營收每月只公布一次（10 日左右），11 日後才開始補抓；
     # 只挑「最後一筆營收 ≥ 35 天前」的股票，避免每日浪費 3000+ API 額度。
-    today = datetime.today()
+    today = datetime.now(_TZ)
     if today.day >= 11:
         stale_before = (today - timedelta(days=35)).strftime("%Y-%m-%d")
         rev_targets = [
             sid for sid in stocks_to_update
-            if (last_revenue_date(sid) or "2018-01-01") < stale_before
+            if (last_revenue_date(sid) or DATA_START) < stale_before
         ]
         if rev_targets:
             logger.info(f"Refreshing monthly revenue for {len(rev_targets)} stocks "
                         f"(stale before {stale_before})...")
             for sid in tqdm(rev_targets, desc="Revenue"):
-                fetch_start = last_revenue_date(sid) or "2018-01-01"
-                rev = fetch_monthly_revenue(sid, fetch_start)
+                fetch_start = last_revenue_date(sid) or DATA_START
+                rev = fetch_monthly_revenue(sid, fetch_start)  # rate-limited inside _finmind()
                 if not rev.empty:
                     _normalize_and_save_revenue(sid, rev)
-                time.sleep(sleep_sec)
 
 
 def screen_today(universe: pd.DataFrame,
@@ -94,8 +93,8 @@ def screen_today(universe: pd.DataFrame,
     market_map = dict(zip(universe["stock_id"], universe["market"]))
 
     # 大盤過濾：今天是否多頭趨勢
-    today_str = datetime.today().strftime("%Y-%m-%d")
-    market_filter = build_market_filter(start="2018-01-01", end=today_str)
+    today_str = datetime.now(_TZ).strftime("%Y-%m-%d")
+    market_filter = build_market_filter(start=DATA_START, end=today_str)
     if market_filter.empty:
         logger.warning("Market filter unavailable — running without it")
         market_filter = None
@@ -117,7 +116,7 @@ def screen_today(universe: pd.DataFrame,
     logger.info("Generating signals...")
     mf = market_filter
 
-    stale_cutoff = pd.Timestamp.today() - pd.Timedelta(days=15)  # ~10 交易日
+    stale_cutoff = pd.Timestamp(datetime.now(_TZ).date()) - pd.Timedelta(days=15)  # ~10 交易日
 
     for sid in tqdm(universe["stock_id"], desc="Screen"):
         price = load_prices(sid, start="2020-01-01")
@@ -195,7 +194,7 @@ def run_daily(notify_fn=None) -> dict | None:
     incremental_update(universe)
     signals = screen_today(universe)
 
-    today = datetime.today().strftime("%Y-%m-%d")
+    today = datetime.now(_TZ).strftime("%Y-%m-%d")
     for tf, df in signals.items():
         n = len(df)
         logger.info(f"[{tf}] {n} signals today")

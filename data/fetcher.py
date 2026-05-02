@@ -7,7 +7,6 @@ import time
 import logging
 import requests
 import pandas as pd
-from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -16,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 FINMIND_TOKEN = os.getenv("FINMIND_TOKEN", "")
 FINMIND_URL = "https://api.finmindtrade.com/api/v4/data"
+_RATE_LIMIT_SEC = 6.0  # FinMind free tier: 600 req/hr → 6 s/req
 
 TWSE_BASE = "https://www.twse.com.tw/exchangeReport"
 TPEX_BASE = "https://www.tpex.org.tw/web/stock"
@@ -104,6 +104,7 @@ def _finmind(dataset: str, stock_id: str, start: str, end: str = "") -> pd.DataF
     if end:
         params["end_date"] = end
     data = _get(FINMIND_URL, params)
+    time.sleep(_RATE_LIMIT_SEC)  # unconditional: rate-limit even on 403/empty
     if not data or data.get("status") != 200:
         logger.warning(f"FinMind {dataset} {stock_id}: {data.get('msg') if data else 'no response'}")
         return pd.DataFrame()

@@ -6,25 +6,24 @@
 """
 import argparse
 import logging
-import time
 import pandas as pd
 from tqdm import tqdm
 
 from data.cache import (
-    init_db, load_universe, load_prices, load_institutional,
+    init_db, load_prices, load_institutional,
     save_prices, save_institutional, save_monthly_revenue, last_price_date,
     load_monthly_revenue, last_revenue_date,
 )
 from data.universe import build_universe
 from data.fetcher import fetch_price, fetch_institutional, fetch_monthly_revenue
 from technical.signals import STRATEGIES
-from technical.indicators import add_all, merge_institutional
 from backtest.engine import run_portfolio_backtest
 from backtest.metrics import calc_metrics, print_report
 from backtest.optimizer import grid_search, pick_best
 from config import (
     BACKTEST_TRAIN_START, BACKTEST_TRAIN_END,
     BACKTEST_TEST_START, BACKTEST_TEST_END,
+    DATA_START,
 )
 
 TAIEX_PROXY = "0050"  # ETF tracking TAIEX; used as 大盤過濾
@@ -56,7 +55,7 @@ logger = logging.getLogger(__name__)
 
 # ─── 資料下載 ─────────────────────────────────────────────────────────────────
 
-def _ensure_taiex_proxy(start: str = "2018-01-01") -> None:
+def _ensure_taiex_proxy(start: str = DATA_START) -> None:
     """確保 0050 資料在 DB（大盤過濾用）"""
     last = last_price_date(TAIEX_PROXY)
     fetch_start = last or start
@@ -73,7 +72,7 @@ def build_market_filter(start: str, end: str, ma_period: int = 60) -> pd.Series:
       OR  收盤雖跌破 MA60，但 MA20 開始上揚（V 轉初期也允許進場）
     避免純 MA60 在 V 轉時錯過最佳買點。
     """
-    df = load_prices(TAIEX_PROXY, start="2018-01-01", end=end)
+    df = load_prices(TAIEX_PROXY, start=DATA_START, end=end)
     if len(df) < ma_period:
         logger.warning("0050 data insufficient for market filter — filter disabled")
         return pd.Series(dtype=bool)
@@ -94,7 +93,6 @@ def download_all(universe: pd.DataFrame,
                  max_stocks: int | None = None) -> None:
     # 先確保大盤代理資料存在
     _ensure_taiex_proxy(start)
-    time.sleep(6)
 
     stocks = sorted(universe["stock_id"].tolist())  # 固定排序，確保斷點續跑順序一致
     if max_stocks:
@@ -105,19 +103,17 @@ def download_all(universe: pd.DataFrame,
         last = last_price_date(sid)
         fetch_start = last or start
 
-        price = fetch_price(sid, fetch_start)
+        price = fetch_price(sid, fetch_start)  # rate-limited inside _finmind()
         if not price.empty:
             save_prices(sid, price)
-        time.sleep(6)  # 不管有無資料都限速，避免爆掉 600 req/hr
 
-        inst = fetch_institutional(sid, fetch_start)
+        inst = fetch_institutional(sid, fetch_start)  # rate-limited inside _finmind()
         if not inst.empty:
             save_institutional(sid, inst)
-        time.sleep(6)
 
 
 def download_revenue(universe: pd.DataFrame,
-                     start: str = "2018-01-01",
+                     start: str = DATA_START,
                      max_stocks: int | None = None) -> None:
     """月營收獨立下載（bootstrap phase 2，主下載完成後再跑）"""
     stocks = sorted(universe["stock_id"].tolist())  # 固定排序，確保斷點續跑順序一致
@@ -128,10 +124,9 @@ def download_revenue(universe: pd.DataFrame,
     for sid in tqdm(stocks, desc="Revenue"):
         last = last_revenue_date(sid)
         fetch_start = last or start
-        rev = fetch_monthly_revenue(sid, fetch_start)
+        rev = fetch_monthly_revenue(sid, fetch_start)  # rate-limited inside _finmind()
         if not rev.empty:
             _normalize_and_save_revenue(sid, rev)
-        time.sleep(6)  # 不管有無資料都限速，避免爆掉 600 req/hr
 
 
 # ─── 策略回測 ─────────────────────────────────────────────────────────────────
@@ -172,10 +167,10 @@ def run_all_strategies(universe: pd.DataFrame,
         needs_rev = strategy.get("needs_revenue", False)
 
         for sid in tqdm(stocks, desc=name, leave=False):
-            price = load_prices(sid, start="2018-01-01", end=end)
+            price = load_prices(sid, start=DATA_START, end=end)
             if len(price) < 60:  # 資料太少跳過
                 continue
-            inst = load_institutional(sid, start="2018-01-01")
+            inst = load_institutional(sid, start=DATA_START)
             extra: dict = {}
             if needs_rev:
                 rev = load_monthly_revenue(sid)
@@ -231,7 +226,7 @@ def optimize(universe: pd.DataFrame, strategy_idx: int = 0,
 
     logger.info(f"Building signal cache for [{name}]...")
     for sid in tqdm(stocks, desc="Signal prep", leave=False):
-        price = load_prices(sid, start="2018-01-01")
+        price = load_prices(sid, start=DATA_START)
         if len(price) < 60:
             continue
         inst = load_institutional(sid)
