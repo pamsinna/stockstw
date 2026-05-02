@@ -29,7 +29,7 @@ def _get(url: str, params: dict, retries: int = 3, delay: float = 1.0) -> dict |
         try:
             r = _session.get(url, params=params, timeout=15)
             # 403 = 付費功能或已下市，直接跳過不重試
-            if r.status_code == 403:
+            if r.status_code in (402, 403):  # 付費功能或已下市，直接跳過不重試
                 return None
             # 429 = rate limit，等久一點再試
             if r.status_code == 429:
