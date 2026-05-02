@@ -2,7 +2,6 @@
 技術指標計算：純 pandas/numpy，不依賴 ta-lib（避免安裝困難）
 輸入 OHLCV DataFrame，輸出附加指標欄位的 DataFrame
 """
-import numpy as np
 import pandas as pd
 
 

@@ -3,6 +3,7 @@ Telegram 通知：用同步 requests 發訊息，不需要 async（GitHub Action
 訊號格式：每個時間框架一則訊息，清楚列出股票代號、市場、關鍵指標
 """
 import os
+import time
 import logging
 import requests
 import pandas as pd
@@ -84,7 +85,6 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
     訊號超過 10 支時按成交量排序（流動性優先）。
     附近期績效監控與執行紀律提醒。
     """
-    import os
     messages = []
 
     long_df    = signals.get("long",    pd.DataFrame())
@@ -128,8 +128,8 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
     else:
         lines = [
             f"🏔 <b>中長線（主力）</b>  共 {len(long_df)} 支",
-            f"停利 +30%  停損 -10%  最長 90 天",
-            f"<i>超過 10 支時取成交金額最高者（流動性優先）</i>\n",
+            "停利 +30%  停損 -10%  最長 90 天",
+            "<i>超過 10 支時取成交金額最高者（流動性優先）</i>\n",
         ]
         for _, row in long_df.head(MAX_POSITIONS).iterrows():
             emoji = MARKET_EMOJI.get(row.get("market", "TWSE"), "⚪")
@@ -152,8 +152,8 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
     if not revenue_df.empty:
         rev_lines = [
             f"📊 <b>策略五：月營收動能</b>  共 {len(revenue_df)} 支",
-            f"停利 +40%  停損 -12%  最長 120 天",
-            f"<i>今為公布後第一交易日，基本面轉折訊號</i>\n",
+            "停利 +40%  停損 -12%  最長 120 天",
+            "<i>今為公布後第一交易日，基本面轉折訊號</i>\n",
         ]
         for _, row in revenue_df.head(MAX_POSITIONS).iterrows():
             emoji = MARKET_EMOJI.get(row.get("market", "TWSE"), "⚪")
@@ -196,4 +196,4 @@ def notify(signals: dict[str, pd.DataFrame]) -> None:
     msgs = format_signals(signals, date)
     for msg in msgs:
         send_message(msg)
-        import time; time.sleep(0.3)  # Telegram rate limit
+        time.sleep(0.3)  # Telegram rate limit

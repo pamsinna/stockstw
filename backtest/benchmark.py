@@ -32,7 +32,7 @@ def load_trades(phase: str = "test") -> pd.DataFrame:
 def load_etf_prices() -> pd.DataFrame:
     df = load_prices(ETF_ID, start="2020-01-01")
     if df.empty:
-        raise RuntimeError(f"0050 price data not in DB — run download first")
+        raise RuntimeError("0050 price data not in DB — run download first")
     return df.sort_values("date").reset_index(drop=True)
 
 
