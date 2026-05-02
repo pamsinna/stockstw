@@ -1,10 +1,11 @@
-from dataclasses import dataclass, field
 from pathlib import Path
 
 ROOT = Path(__file__).parent
 DB_PATH = ROOT / "data" / "cache.db"
 REPORT_DIR = ROOT / "reports"
 REPORT_DIR.mkdir(exist_ok=True)
+
+DATA_START = "2018-01-01"  # earliest history kept in cache DB
 
 # FinMind
 FINMIND_API_URL = "https://api.finmindtrade.com/api/v4/data"
