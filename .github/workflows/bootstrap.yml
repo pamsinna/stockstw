@@ -8,7 +8,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 180  # 允許 3 小時；每股 2 API calls × 6s = ~12s，3013 股需 ~4 次重跑
     permissions:
-      actions: write  # 允許 gh workflow run 自我觸發
+      actions: write   # 允許 gh workflow run 自我觸發
+      contents: read   # checkout 需要（手動列 permissions 時其他權限會被撤銷）
 
     steps:
       - name: Checkout
