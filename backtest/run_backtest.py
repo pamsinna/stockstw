@@ -13,7 +13,7 @@ from tqdm import tqdm
 from data.cache import (
     init_db, load_prices, load_institutional,
     save_prices, save_institutional, save_monthly_revenue, last_price_date,
-    load_monthly_revenue, last_revenue_date,
+    load_monthly_revenue, last_revenue_date, mark_fetch_skip,
 )
 from data.universe import build_universe
 from data.fetcher import fetch_price, fetch_institutional, fetch_monthly_revenue
@@ -123,11 +123,15 @@ def download_all(universe: pd.DataFrame,
         fetch_start = last or start
 
         price = fetch_price(sid, fetch_start)  # rate-limited inside _finmind()
-        if not price.empty:
+        if price is None:
+            mark_fetch_skip(sid, "price")    # 402/403: 永久跳過，不再重試
+        elif not price.empty:
             save_prices(sid, price)
 
         inst = fetch_institutional(sid, fetch_start)  # rate-limited inside _finmind()
-        if not inst.empty:
+        if inst is None:
+            mark_fetch_skip(sid, "institutional")
+        elif not inst.empty:
             save_institutional(sid, inst)
 
     if skipped:

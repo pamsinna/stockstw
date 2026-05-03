@@ -24,13 +24,16 @@ _session = requests.Session()
 _session.headers.update({"User-Agent": "Mozilla/5.0 (research bot)"})
 
 
-def _get(url: str, params: dict, retries: int = 3, delay: float = 1.0) -> dict | None:
+_PERM_SKIP = object()  # sentinel: 402/403 — permanent skip, no retry, no sleep
+
+
+def _get(url: str, params: dict, retries: int = 3, delay: float = 1.0):
     for i in range(retries):
         try:
             r = _session.get(url, params=params, timeout=15)
-            # 403 = 付費功能或已下市，直接跳過不重試
-            if r.status_code in (402, 403):  # 付費功能或已下市，直接跳過不重試
-                return None
+            # 402/403 = 付費限制或已下市，永久跳過（不重試、不睡覺）
+            if r.status_code in (402, 403):
+                return _PERM_SKIP
             # 429 = rate limit，等久一點再試
             if r.status_code == 429:
                 time.sleep(60)
@@ -94,7 +97,11 @@ def fetch_tpex_stock_list() -> pd.DataFrame:
 
 # ─── FinMind API ──────────────────────────────────────────────────────────────
 
-def _finmind(dataset: str, stock_id: str, start: str, end: str = "") -> pd.DataFrame:
+def _finmind(dataset: str, stock_id: str, start: str, end: str = "") -> pd.DataFrame | None:
+    """
+    回傳 DataFrame（有或沒有資料）或 None。
+    None = 402/403 永久跳過，呼叫方應寫入 fetch_log 避免下次重試。
+    """
     params = {
         "dataset": dataset,
         "data_id": stock_id,
@@ -104,7 +111,10 @@ def _finmind(dataset: str, stock_id: str, start: str, end: str = "") -> pd.DataF
     if end:
         params["end_date"] = end
     data = _get(FINMIND_URL, params)
-    time.sleep(_RATE_LIMIT_SEC)  # unconditional: rate-limit even on 403/empty
+    if data is _PERM_SKIP:
+        logger.debug(f"FinMind {dataset} {stock_id}: 402/403 permanent skip")
+        return None  # 不睡覺，直接回傳 None
+    time.sleep(_RATE_LIMIT_SEC)
     if not data or data.get("status") != 200:
         logger.warning(f"FinMind {dataset} {stock_id}: {data.get('msg') if data else 'no response'}")
         return pd.DataFrame()
@@ -114,9 +124,11 @@ def _finmind(dataset: str, stock_id: str, start: str, end: str = "") -> pd.DataF
     return df
 
 
-def fetch_price(stock_id: str, start: str, end: str = "") -> pd.DataFrame:
-    """日K OHLCV，涵蓋上市+上櫃+興櫃"""
+def fetch_price(stock_id: str, start: str, end: str = "") -> pd.DataFrame | None:
+    """日K OHLCV。回傳 None 代表 402/403 永久跳過；空 DataFrame 代表暫無資料。"""
     df = _finmind("TaiwanStockPrice", stock_id, start, end)
+    if df is None:
+        return None
     if df.empty:
         return df
     cols = {"open": "open", "max": "high", "min": "low", "close": "close",
@@ -127,9 +139,11 @@ def fetch_price(stock_id: str, start: str, end: str = "") -> pd.DataFrame:
     return df[existing].sort_values("date").reset_index(drop=True)
 
 
-def fetch_institutional(stock_id: str, start: str, end: str = "") -> pd.DataFrame:
-    """三大法人買賣超（外資、投信、自營商）"""
+def fetch_institutional(stock_id: str, start: str, end: str = "") -> pd.DataFrame | None:
+    """三大法人買賣超。回傳 None 代表 402/403 永久跳過。"""
     df = _finmind("TaiwanStockInstitutionalInvestorsBuySell", stock_id, start, end)
+    if df is None:
+        return None
     if df.empty:
         return df
 

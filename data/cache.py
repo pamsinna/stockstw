@@ -236,6 +236,16 @@ def save_monthly_revenue(stock_id: str, df: pd.DataFrame) -> None:
         )
 
 
+def mark_fetch_skip(stock_id: str, dataset: str) -> None:
+    """記錄此股票／資料集為永久跳過（402/403）。
+    fetch_log 日期設 9999-12-31，下次 last_X_date() 回傳值 >= 任何昨天，不再重試。"""
+    with _conn() as con:
+        con.execute(
+            "INSERT OR REPLACE INTO fetch_log VALUES (?,?,?)",
+            (stock_id, dataset, "9999-12-31")
+        )
+
+
 def last_revenue_date(stock_id: str) -> str | None:
     with _conn() as con:
         row = con.execute(
