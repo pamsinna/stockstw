@@ -6,6 +6,7 @@
 """
 import argparse
 import logging
+from datetime import datetime, timedelta
 import pandas as pd
 from tqdm import tqdm
 
@@ -111,9 +112,14 @@ def download_all(universe: pd.DataFrame,
     if max_stocks:
         stocks = stocks[:max_stocks]
 
+    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
     logger.info(f"Downloading price + institutional for {len(stocks)} stocks...")
-    for i, sid in enumerate(tqdm(stocks, desc="Download")):
+    skipped = 0
+    for sid in tqdm(stocks, desc="Download"):
         last = last_price_date(sid)
+        if last and last >= yesterday:
+            skipped += 1
+            continue
         fetch_start = last or start
 
         price = fetch_price(sid, fetch_start)  # rate-limited inside _finmind()
@@ -124,6 +130,9 @@ def download_all(universe: pd.DataFrame,
         if not inst.empty:
             save_institutional(sid, inst)
 
+    if skipped:
+        logger.info(f"Skipped {skipped} already up-to-date stocks")
+
 
 def download_revenue(universe: pd.DataFrame,
                      start: str = DATA_START,
@@ -133,13 +142,21 @@ def download_revenue(universe: pd.DataFrame,
     if max_stocks:
         stocks = stocks[:max_stocks]
 
+    stale_before = (datetime.now() - timedelta(days=35)).strftime("%Y-%m-%d")
     logger.info(f"Downloading monthly revenue for {len(stocks)} stocks...")
+    skipped = 0
     for sid in tqdm(stocks, desc="Revenue"):
         last = last_revenue_date(sid)
+        if last and last >= stale_before:
+            skipped += 1
+            continue
         fetch_start = last or start
         rev = fetch_monthly_revenue(sid, fetch_start)  # rate-limited inside _finmind()
         if not rev.empty:
             _normalize_and_save_revenue(sid, rev)
+
+    if skipped:
+        logger.info(f"Skipped {skipped} stocks with recent revenue data")
 
 
 # ─── 策略回測 ─────────────────────────────────────────────────────────────────
