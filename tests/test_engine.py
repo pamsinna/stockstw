@@ -74,7 +74,7 @@ def test_max_hold_exits_at_next_open(handcrafted_price_with_signal):
     assert trade.exit_reason == "max_hold"
     # entry at 2024-01-05, max_hold check fires on 2024-01-08 (≥1 day),
     # exits at NEXT bar's open (2024-01-09 open = 105).
-    assert trade.exit_price == pytest.approx(105 * (1 + SLIPPAGE))
+    assert trade.exit_price == pytest.approx(105 * (1 - SLIPPAGE))
 
 
 def test_pnl_pct_subtracts_buy_sell_and_tax_for_twse():
