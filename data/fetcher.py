@@ -111,10 +111,10 @@ def _finmind(dataset: str, stock_id: str, start: str, end: str = "") -> pd.DataF
     if end:
         params["end_date"] = end
     data = _get(FINMIND_URL, params)
+    time.sleep(_RATE_LIMIT_SEC)  # 402/403 也要睡：請求已打出去，需遵守 rate limit
     if data is _PERM_SKIP:
         logger.debug(f"FinMind {dataset} {stock_id}: 402/403 permanent skip")
-        return None  # 不睡覺，直接回傳 None
-    time.sleep(_RATE_LIMIT_SEC)
+        return None
     if not data or data.get("status") != 200:
         logger.warning(f"FinMind {dataset} {stock_id}: {data.get('msg') if data else 'no response'}")
         return pd.DataFrame()
