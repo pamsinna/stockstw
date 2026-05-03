@@ -91,8 +91,18 @@ def signal_longterm_quality_entry(df: pd.DataFrame,
     cond_bb = (df["bb_pct"] > 0.3) & (df["bb_pct"] < 0.85)
     # RSI 未過熱
     cond_rsi = df["rsi"] < 70
+    # 法人 60 日累計淨買超：外資或投信至少一方長線收貨
+    # 偷收貨不會連買，所以看 60 日累計而非連續天數
+    if "foreign_" in df.columns or "trust" in df.columns:
+        f_60d = (df["foreign_"].rolling(60, min_periods=30).sum()
+                 if "foreign_" in df.columns else pd.Series(0.0, index=df.index))
+        t_60d = (df["trust"].rolling(60, min_periods=30).sum()
+                 if "trust" in df.columns else pd.Series(0.0, index=df.index))
+        cond_inst_accum = (f_60d > 0) | (t_60d > 0)
+    else:
+        cond_inst_accum = pd.Series(True, index=df.index)
 
-    df["signal_long"] = (cond_above_ma60 & cond_macd & cond_bb & cond_rsi)
+    df["signal_long"] = (cond_above_ma60 & cond_macd & cond_bb & cond_rsi & cond_inst_accum)
     return _apply_market_filter(df, "signal_long", market_filter)
 
 
@@ -243,30 +253,82 @@ def signal_revenue_momentum(
     return _apply_market_filter(df, "signal_rev", market_filter)
 
 
+# ─── 策略六：短線反轉收貨 ────────────────────────────────────────────────────
+
+def signal_reversal_inst(
+    df: pd.DataFrame,
+    inst_df: pd.DataFrame | None = None,
+    market_filter: pd.Series | None = None,
+) -> pd.DataFrame:
+    """
+    策略六：短線反轉收貨（目標持倉 ≤ 20 個交易日）
+
+    三階段底部確認：
+      階段一 - 跌破 MA20 支撐（近 10 日內曾在 MA20 上方，目前在 MA20 下方）
+      階段二 - 量縮確認賣盤耗盡（近 2 日均量 < MA20量 × 0.7）
+      階段三 - 第一根紅K翻轉（收 > 開 AND 收 > 昨收，量開始回升）
+    法人：長線收貨（60日） + 短線丟出（10日）製造底部，OR 邏輯
+    出場（engine）：停利 +15%、停損 -7%、最長 20日、連跌兩日次日出
+    """
+    df = add_all(df).copy()
+    df["signal_reversal"] = False
+
+    vol_ma20 = df["volume"].rolling(20, min_periods=10).mean()
+
+    # ── 流動性 ────────────────────────────────────────────────────────
+    cond_liquid = (vol_ma20 > 500) & (df["close"] > 15)
+
+    # ── 階段一：跌破 MA20 支撐 ───────────────────────────────────────
+    # 目前在 MA20 下方，且近 10 日最高曾在 MA20 上方（確認是跌破，不是長期空頭）
+    below_ma20_now  = df["close"].shift(1) < df["ma20"].shift(1)
+    was_above_ma20  = df["close"].shift(1).rolling(10, min_periods=5).max() > df["ma20"].shift(1)
+    cond_broke_support = below_ma20_now & was_above_ma20
+
+    # ── 階段二：量縮（賣盤力道耗盡）────────────────────────────────
+    # 近 2 日成交量均低於 MA20量 × 0.7
+    vol_shrink = (
+        (df["volume"].shift(1) < vol_ma20 * 0.7) &
+        (df["volume"].shift(2) < vol_ma20 * 0.7)
+    )
+
+    # ── 階段三：今日翻轉紅K ──────────────────────────────────────────
+    cond_bullish = df["close"] > df["open"]           # 收紅（台股 = 收漲）
+    cond_higher  = df["close"] > df["close"].shift(1) # 收高於昨收
+    # 量開始回升：今日量 > 昨日量（量縮後有人接手），無需大量
+    cond_vol_recover = df["volume"] > df["volume"].shift(1)
+
+    # ── 法人：長線收貨 + 短線丟出（OR 邏輯）────────────────────────
+    if inst_df is not None and not inst_df.empty:
+        df = merge_institutional(df, inst_df)
+
+    if "foreign_" in df.columns and "trust" in df.columns:
+        f_60d = df["foreign_"].rolling(60, min_periods=30).sum()
+        t_60d = df["trust"].rolling(60, min_periods=30).sum()
+        f_10d = df["foreign_"].rolling(10, min_periods=5).sum()
+        t_10d = df["trust"].rolling(10, min_periods=5).sum()
+        inst_long  = (f_60d > 0) | (t_60d > 0)
+        inst_short = (f_10d < 0) | (t_10d < 0)
+    else:
+        inst_long  = pd.Series(True, index=df.index)
+        inst_short = pd.Series(True, index=df.index)
+
+    df["signal_reversal"] = (
+        cond_liquid &
+        cond_broke_support &
+        vol_shrink &
+        cond_bullish &
+        cond_higher &
+        cond_vol_recover &
+        inst_long &
+        inst_short
+    )
+
+    return _apply_market_filter(df, "signal_reversal", market_filter)
+
+
 # ─── 全策略清單（供批次回測用）────────────────────────────────────────────────
 
 STRATEGIES = [
-    {
-        "name": "短線_量暴增突破",
-        "signal_fn": signal_short_vol_breakout,
-        "signal_col": "signal_short",
-        "timeframe": "short",
-        "default_tp": 0.08, "default_sl": 0.05, "default_hold": 5,
-    },
-    {
-        "name": "波段_均線KD法人",
-        "signal_fn": signal_swing_ma_kd_inst,
-        "signal_col": "signal_swing",
-        "timeframe": "swing",
-        "default_tp": 0.15, "default_sl": 0.07, "default_hold": 20,
-    },
-    {
-        "name": "波段_外資投信雙買",
-        "signal_fn": signal_swing_dual_inst,
-        "signal_col": "signal_dual_inst",
-        "timeframe": "swing",
-        "default_tp": 0.12, "default_sl": 0.06, "default_hold": 20,
-    },
     {
         "name": "中長線_品質股低接",
         "signal_fn": signal_longterm_quality_entry,
@@ -281,6 +343,6 @@ STRATEGIES = [
         "signal_col": "signal_rev",
         "timeframe": "revenue",
         "default_tp": 0.40, "default_sl": 0.12, "default_hold": 120,
-        "needs_revenue": True,  # 告知回測/選股迴圈需要額外載入月營收資料
+        "needs_revenue": True,
     },
 ]

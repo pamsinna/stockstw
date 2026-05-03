@@ -227,7 +227,8 @@ def run_all_strategies(universe: pd.DataFrame,
 
         result = run_portfolio_backtest(
             price_map, signal_col, tp, sl, mh,
-            start, end, market_map=market_map
+            start, end, market_map=market_map,
+            consec_down_exit=strategy.get("consec_down_exit", False),
         )
         m = calc_metrics(result)
         print_report(name, m, phase=phase)

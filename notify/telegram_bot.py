@@ -41,7 +41,6 @@ def send_message(text: str) -> bool:
         return False
 
 
-POSITION_SIZE_PCT  = 5    # 每筆建議部位：總資金 5%
 MAX_POSITIONS      = 10   # 最多同時持有 10 檔
 WIN_RATE_PAUSE_THR = 0.28 # 近 20 筆勝率低於此值 → 發出暫停警告
 
@@ -104,8 +103,7 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
     # ── Header ────────────────────────────────────────────────────────────
     header = (
         f"📊 <b>台股選股報告 {date}</b>\n"
-        f"主力訊號（中長線）：{len(long_df)} 支\n"
-        f"建議部位：每筆 {POSITION_SIZE_PCT}%，最多同時持 {MAX_POSITIONS} 檔"
+        f"主力訊號（中長線）：{len(long_df)} 支"
     )
     messages.append(header)
 

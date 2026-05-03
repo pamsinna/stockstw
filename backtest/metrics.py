@@ -6,6 +6,39 @@ import pandas as pd
 from backtest.engine import BacktestResult
 
 
+def _daily_portfolio_returns(df: pd.DataFrame) -> pd.Series:
+    """
+    把並行交易攤到每個交易日，建立真實的等權組合日報酬序列。
+    每筆交易的 pnl_pct 均攤到持倉期間每個交易日，
+    再對當天所有活躍部位取平均（等權）。
+    """
+    if df.empty:
+        return pd.Series(dtype=float)
+
+    dates = pd.bdate_range(df["entry_date"].min(), df["exit_date"].max())
+    n = len(dates)
+    date_pos = {d: i for i, d in enumerate(dates)}
+
+    total = np.zeros(n)
+    count = np.zeros(n)
+
+    for row in df.itertuples(index=False):
+        td = pd.bdate_range(row.entry_date, row.exit_date)
+        if len(td) == 0:
+            continue
+        daily = row.pnl_pct / len(td)
+        for d in td:
+            if d in date_pos:
+                idx = date_pos[d]
+                total[idx] += daily
+                count[idx] += 1
+
+    active = count > 0
+    ret = np.zeros(n)
+    ret[active] = total[active] / count[active]
+    return pd.Series(ret, index=dates)
+
+
 def calc_metrics(result: BacktestResult, annual_trading_days: int = 250) -> dict:
     df = result.to_df()
     if df.empty:
@@ -23,23 +56,21 @@ def calc_metrics(result: BacktestResult, annual_trading_days: int = 250) -> dict
     # 最大連續虧損次數
     streak = _max_loss_streak(pnl)
 
-    # 資金曲線 & 最大回撤
-    equity = (1 + pnl).cumprod()
+    # 每日組合報酬（等權並行）→ 正確的 equity curve
+    daily = _daily_portfolio_returns(df)
+    equity = (1 + daily).cumprod()
     drawdown = equity / equity.cummax() - 1
     max_dd = drawdown.min()
 
-    # 年化報酬（以實際時間跨度估算）
-    if len(df) > 1:
-        days_span = (df["exit_date"].max() - df["entry_date"].min()).days
-        years = days_span / 365
-        cagr = equity.iloc[-1] ** (1 / max(years, 0.1)) - 1 if years > 0 else np.nan
-    else:
-        cagr = np.nan
+    # 年化報酬
+    years = (daily.index[-1] - daily.index[0]).days / 365
+    cagr = equity.iloc[-1] ** (1 / max(years, 0.1)) - 1 if years > 0 else np.nan
 
-    # Sharpe（簡化版，假設無風險利率 1.5%）
+    # Sharpe（只計算有持倉的日子，無風險利率 1.5%）
     rf_daily = 0.015 / annual_trading_days
-    daily_ret = pnl / df["hold_days"].clip(lower=1)
-    sharpe = (daily_ret.mean() - rf_daily) / (daily_ret.std() + 1e-9) * np.sqrt(annual_trading_days)
+    active_daily = daily[daily != 0]
+    sharpe = ((active_daily.mean() - rf_daily) / (active_daily.std() + 1e-9)
+              * np.sqrt(annual_trading_days)) if len(active_daily) > 1 else np.nan
 
     return {
         "n_trades":       n,

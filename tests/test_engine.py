@@ -163,6 +163,56 @@ def test_no_signal_produces_no_trades():
     assert result.trades == []
 
 
+def test_consec_down_exit_fires_after_two_down_closes(handcrafted_price_with_signal):
+    """連跌兩日後應在次日開盤（帶賣出滑價）出場，exit_reason='consec_down'。"""
+    df = handcrafted_price_with_signal.copy().astype({"close": float})
+    # entry bar = index 3 (2024-01-05), close=103
+    # index 4 (2024-01-08): close 下跌 → streak=1
+    # index 5 (2024-01-09): close 再跌 → streak=2 → 次日出（index 6 open=106）
+    df.loc[4, "close"] = 101.0
+    df.loc[5, "close"] = 99.0
+    result = run_backtest(
+        df, signal_col="signal",
+        take_profit=0.99, stop_loss=0.99, max_hold_days=999,
+        start="2024-01-01", end="2024-12-31",
+        consec_down_exit=True,
+    )
+    assert len(result.trades) == 1
+    trade = result.trades[0]
+    assert trade.exit_reason == "consec_down"
+    assert trade.exit_price == pytest.approx(106 * (1 - SLIPPAGE))
+
+
+def test_consec_down_exit_requires_two_consecutive_days(handcrafted_price_with_signal):
+    """一日下跌不觸發出場，後續全漲確認 streak 不累積至 2。"""
+    df = handcrafted_price_with_signal.copy().astype({"close": float})
+    df.loc[4, "close"] = 101.0              # 跌 → streak=1
+    for idx in range(5, 12):               # 之後全漲，streak 永遠 reset
+        df.loc[idx, "close"] = 110.0 + idx
+    result = run_backtest(
+        df, signal_col="signal",
+        take_profit=0.99, stop_loss=0.99, max_hold_days=999,
+        start="2024-01-01", end="2024-12-31",
+        consec_down_exit=True,
+    )
+    assert len(result.trades) == 1
+    assert result.trades[0].exit_reason == "end_of_period"
+
+
+def test_consec_down_exit_ignored_when_disabled(handcrafted_price_with_signal):
+    """consec_down_exit=False 時連跌不觸發出場。"""
+    df = handcrafted_price_with_signal.copy().astype({"close": float})
+    df.loc[4, "close"] = 101.0
+    df.loc[5, "close"] = 99.0
+    result = run_backtest(
+        df, signal_col="signal",
+        take_profit=0.99, stop_loss=0.99, max_hold_days=999,
+        start="2024-01-01", end="2024-12-31",
+        consec_down_exit=False,
+    )
+    assert result.trades[0].exit_reason == "end_of_period"
+
+
 def test_open_trade_force_closed_at_end_of_period(handcrafted_price_with_signal):
     """Trades still open at end of period must be force-closed at last close."""
     df = handcrafted_price_with_signal

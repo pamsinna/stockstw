@@ -21,9 +21,6 @@ from data.fetcher import fetch_price, fetch_institutional, fetch_monthly_revenue
 from backtest.run_backtest import build_market_filter, _normalize_and_save_revenue
 from fundamental.quality_filter import batch_fundamentals
 from technical.signals import (
-    signal_short_vol_breakout,
-    signal_swing_ma_kd_inst,
-    signal_swing_dual_inst,
     signal_longterm_quality_entry,
     signal_revenue_momentum,
 )
@@ -89,7 +86,7 @@ def screen_today(universe: pd.DataFrame,
     回傳 {timeframe: DataFrame of signals today}
     timeframe: "short", "swing", "long"
     """
-    results: dict[str, list] = {"short": [], "swing": [], "long": [], "revenue": []}
+    results: dict[str, list] = {"long": [], "revenue": []}
     market_map = dict(zip(universe["stock_id"], universe["market"]))
 
     # 大盤過濾：今天是否多頭趨勢
@@ -133,17 +130,6 @@ def screen_today(universe: pd.DataFrame,
         market = market_map.get(sid, "TWSE")
 
         try:
-            df_s = signal_short_vol_breakout(price, inst_arg, market_filter=mf)
-            if bool(df_s.iloc[-1]["signal_short"]):
-                results["short"].append(_summary_row(sid, market, df_s, "short"))
-
-            if sid in fund_ok:
-                df_sw = signal_swing_ma_kd_inst(price, inst_arg, market_filter=mf)
-                df_di = signal_swing_dual_inst(price, inst_arg, market_filter=mf)
-                if bool(df_sw.iloc[-1]["signal_swing"]) or bool(df_di.iloc[-1]["signal_dual_inst"]):
-                    base_df = df_di if bool(df_di.iloc[-1]["signal_dual_inst"]) else df_sw
-                    results["swing"].append(_summary_row(sid, market, base_df, "swing"))
-
             if sid in fund_ok:
                 df_l = signal_longterm_quality_entry(price, inst_arg, market_filter=strict_mf)
                 if bool(df_l.iloc[-1]["signal_long"]):

@@ -81,10 +81,12 @@ def run_backtest(
     end: str,
     stock_id: str = "",
     market: str = "TWSE",
+    consec_down_exit: bool = False,
 ) -> BacktestResult:
     """
     price_df 必須有欄位：date, open, high, low, close, <signal_col>
     signal_col: True/1 表示當天收盤後產生買進訊號，次日開盤進場
+    consec_down_exit: True 時，持倉期間連續兩日收低則次日開盤出場
     """
     df = price_df.copy()
     df = df[(df["date"] >= pd.Timestamp(start)) &
@@ -102,6 +104,8 @@ def run_backtest(
     result = BacktestResult()
     in_trade = False
     trade: Trade | None = None
+    down_streak: int = 0
+    prev_close_in_trade: float = 0.0
 
     for i in range(len(df) - 1):
         row   = df.iloc[i]
@@ -117,7 +121,19 @@ def run_backtest(
                 result.trades.append(trade)
                 in_trade = False
                 trade = None
+                down_streak = 0
+                prev_close_in_trade = 0.0
                 continue
+
+            # 連跌計數（收盤低於前一日收盤）
+            if consec_down_exit:
+                if prev_close_in_trade > 0:
+                    if row["close"] < prev_close_in_trade:
+                        down_streak += 1
+                    else:
+                        down_streak = 0
+                prev_close_in_trade = row["close"]
+
             high_ret = (row["high"] - ep) / ep
             low_ret  = (row["low"]  - ep) / ep
             sl_hit = low_ret <= -stop_loss
@@ -147,14 +163,20 @@ def run_backtest(
                 # 到期用次日開盤出場（與進場邏輯一致，訊號T日確認→T+1執行）
                 exit_price = next_["open"] * (1 - SLIPPAGE)
                 reason = "max_hold"
+            elif consec_down_exit and down_streak >= 2:
+                # 連跌兩日動能止損，次日開盤出
+                exit_price = next_["open"] * (1 - SLIPPAGE)
+                reason = "consec_down"
 
             if exit_price is not None:
-                trade.exit_date  = next_["date"] if reason == "max_hold" else row["date"]
+                trade.exit_date  = next_["date"] if reason in ("max_hold", "consec_down") else row["date"]
                 trade.exit_price = exit_price
                 trade.exit_reason = reason
                 result.trades.append(trade)
                 in_trade = False
                 trade = None
+                down_streak = 0
+                prev_close_in_trade = 0.0
                 continue
 
         # ── 無持倉：檢查進場訊號 ─────────────────────────────────────────
@@ -168,6 +190,8 @@ def run_backtest(
                 market=market,
             )
             in_trade = True
+            down_streak = 0
+            prev_close_in_trade = 0.0
 
     # 回測結束時強制平倉未了結部位
     if in_trade and trade is not None:
@@ -189,6 +213,7 @@ def run_portfolio_backtest(
     start: str,
     end: str,
     market_map: dict[str, str] | None = None,
+    consec_down_exit: bool = False,
 ) -> BacktestResult:
     """多股票批次回測，整合所有交易到一個 BacktestResult"""
     combined = BacktestResult()
@@ -197,7 +222,8 @@ def run_portfolio_backtest(
         r = run_backtest(
             price_df, signal_col,
             take_profit, stop_loss, max_hold_days,
-            start, end, stock_id, market
+            start, end, stock_id, market,
+            consec_down_exit=consec_down_exit,
         )
         combined.trades.extend(r.trades)
     return combined
