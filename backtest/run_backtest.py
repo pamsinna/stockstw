@@ -73,12 +73,12 @@ def _ensure_taiex_proxy(start: str = DATA_START) -> None:
         logger.info(f"0050 (TAIEX proxy) updated: {len(price)} rows")
 
 
-def build_market_filter(start: str, end: str, ma_period: int = 60) -> pd.Series:
+def build_market_filter(start: str, end: str, ma_period: int = 60,
+                        strict: bool = False) -> pd.Series:
     """
-    大盤過濾（寬鬆版）：
-      多頭 = 收盤 > MA60
-      OR  收盤雖跌破 MA60，但 MA20 開始上揚（V 轉初期也允許進場）
-    避免純 MA60 在 V 轉時錯過最佳買點。
+    大盤過濾：
+      寬鬆（預設）：收盤 > MA60，OR MA20 開始上揚（V 轉初期允許進場）
+      嚴格（strict=True，策略四專用）：收盤 > MA60 AND MA60 本身上升（5日比較）
     """
     df = load_prices(TAIEX_PROXY, start=DATA_START, end=end)
     if len(df) < ma_period:
@@ -86,13 +86,18 @@ def build_market_filter(start: str, end: str, ma_period: int = 60) -> pd.Series:
         return pd.Series(dtype=bool)
     df = df.sort_values("date").reset_index(drop=True)
     df["ma60"] = df["close"].rolling(60).mean()
-    df["ma20"] = df["close"].rolling(20).mean()
-    df["ma20_rising"] = df["ma20"] > df["ma20"].shift(5)  # MA20 比 5 日前高
 
-    above_ma60   = df["close"] > df["ma60"]
-    v_turn_early = df["ma20_rising"] & (df["close"] > df["ma20"])
+    above_ma60 = df["close"] > df["ma60"]
 
-    df["market_up"] = above_ma60 | v_turn_early
+    if strict:
+        df["ma60_rising"] = df["ma60"] > df["ma60"].shift(5)
+        df["market_up"] = above_ma60 & df["ma60_rising"]
+    else:
+        df["ma20"] = df["close"].rolling(20).mean()
+        df["ma20_rising"] = df["ma20"] > df["ma20"].shift(5)
+        v_turn_early = df["ma20_rising"] & (df["close"] > df["ma20"])
+        df["market_up"] = above_ma60 | v_turn_early
+
     return df.set_index("date")["market_up"]
 
 
@@ -152,14 +157,17 @@ def run_all_strategies(universe: pd.DataFrame,
 
     market_map = dict(zip(universe["stock_id"], universe["market"]))
 
-    # 大盤過濾：0050 收盤 > MA60 才允許買進
+    # 大盤過濾：寬鬆版（策略一～三、五），嚴格版（策略四專用）
     market_filter = build_market_filter(start, end)
+    strict_market_filter = build_market_filter(start, end, strict=True)
     if market_filter.empty:
         logger.warning("Market filter unavailable — running without it")
     else:
         bull_days = int(market_filter.loc[market_filter.index >= pd.Timestamp(start)].sum())
         total_days = int((market_filter.index >= pd.Timestamp(start)).sum())
         logger.info(f"Market filter ready: {bull_days}/{total_days} bull days in period")
+        s_days = int(strict_market_filter.loc[strict_market_filter.index >= pd.Timestamp(start)].sum())
+        logger.info(f"Strict market filter (S4): {s_days}/{total_days} bull days in period")
 
     for strategy in STRATEGIES:
         name       = strategy["name"]
@@ -172,7 +180,9 @@ def run_all_strategies(universe: pd.DataFrame,
         price_map: dict[str, pd.DataFrame] = {}
         logger.info(f"Preparing signals for [{name}]...")
 
-        needs_rev = strategy.get("needs_revenue", False)
+        needs_rev   = strategy.get("needs_revenue", False)
+        use_strict  = strategy.get("strict_market", False)
+        active_mf   = strict_market_filter if use_strict else market_filter
 
         for sid in tqdm(stocks, desc=name, leave=False):
             price = load_prices(sid, start=DATA_START, end=end)
@@ -187,7 +197,7 @@ def run_all_strategies(universe: pd.DataFrame,
                 df = signal_fn(
                     price,
                     inst_df=inst if not inst.empty else None,
-                    market_filter=market_filter if not market_filter.empty else None,
+                    market_filter=active_mf if not active_mf.empty else None,
                     **extra,
                 )
                 price_map[sid] = df

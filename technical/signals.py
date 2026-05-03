@@ -273,6 +273,7 @@ STRATEGIES = [
         "signal_col": "signal_long",
         "timeframe": "long",
         "default_tp": 0.30, "default_sl": 0.10, "default_hold": 90,
+        "strict_market": True,
     },
     {
         "name": "月營收動能",

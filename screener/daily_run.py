@@ -95,9 +95,11 @@ def screen_today(universe: pd.DataFrame,
     # 大盤過濾：今天是否多頭趨勢
     today_str = datetime.now(_TZ).strftime("%Y-%m-%d")
     market_filter = build_market_filter(start=DATA_START, end=today_str)
+    strict_market_filter = build_market_filter(start=DATA_START, end=today_str, strict=True)
     if market_filter.empty:
         logger.warning("Market filter unavailable — running without it")
         market_filter = None
+        strict_market_filter = None
     else:
         avail = market_filter[market_filter.index <= pd.Timestamp(today_str)]
         if not avail.empty:
@@ -115,6 +117,7 @@ def screen_today(universe: pd.DataFrame,
 
     logger.info("Generating signals...")
     mf = market_filter
+    strict_mf = strict_market_filter
 
     stale_cutoff = pd.Timestamp(datetime.now(_TZ).date()) - pd.Timedelta(days=15)  # ~10 交易日
 
@@ -142,7 +145,7 @@ def screen_today(universe: pd.DataFrame,
                     results["swing"].append(_summary_row(sid, market, base_df, "swing"))
 
             if sid in fund_ok:
-                df_l = signal_longterm_quality_entry(price, inst_arg, market_filter=mf)
+                df_l = signal_longterm_quality_entry(price, inst_arg, market_filter=strict_mf)
                 if bool(df_l.iloc[-1]["signal_long"]):
                     results["long"].append(_summary_row(sid, market, df_l, "long"))
 
