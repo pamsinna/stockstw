@@ -61,10 +61,9 @@ def incremental_update(universe: pd.DataFrame) -> None:
         if not inst.empty:
             save_institutional(sid, inst)
 
-    # 月營收每月只公布一次（10 日左右），11 日後才開始補抓；
-    # 只挑「最後一筆營收 ≥ 35 天前」的股票，避免每日浪費 3000+ API 額度。
+    # 月營收：每月 1～10 號才抓（法規要求 10 號前公布，提早抓以第一時間收到）
     today = datetime.now(_TZ)
-    if today.day >= 11:
+    if today.day <= 10:
         stale_before = (today - timedelta(days=35)).strftime("%Y-%m-%d")
         rev_targets = [
             sid for sid in stocks_to_update

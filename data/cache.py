@@ -4,6 +4,7 @@
 """
 import sqlite3
 import logging
+from datetime import date as _date
 import pandas as pd
 from config import DB_PATH
 
@@ -72,6 +73,7 @@ def init_db() -> None:
         date         TEXT NOT NULL,
         revenue      REAL,
         revenue_yoy  REAL,
+        fetched_date TEXT,
         PRIMARY KEY (stock_id, date)
     );
 
@@ -84,6 +86,11 @@ def init_db() -> None:
     """
     with _conn() as con:
         con.executescript(ddl)
+        # migration: add fetched_date to existing DBs (idempotent)
+        try:
+            con.execute("ALTER TABLE monthly_revenue ADD COLUMN fetched_date TEXT")
+        except sqlite3.OperationalError:
+            pass  # column already exists
     logger.info(f"DB initialised at {DB_PATH}")
 
 
@@ -216,7 +223,9 @@ def save_monthly_revenue(stock_id: str, df: pd.DataFrame) -> None:
     df = df.copy()
     df["stock_id"] = stock_id
     df["date"] = df["date"].astype(str)
-    needed = ["stock_id", "date", "revenue", "revenue_yoy"]
+    # record today as the first-fetch date (INSERT OR IGNORE keeps original)
+    df["fetched_date"] = str(_date.today())
+    needed = ["stock_id", "date", "revenue", "revenue_yoy", "fetched_date"]
     existing = [c for c in needed if c in df.columns]
     with _conn() as con:
         df[existing].to_sql("monthly_revenue", con, if_exists="append",

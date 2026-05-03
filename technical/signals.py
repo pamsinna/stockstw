@@ -190,14 +190,21 @@ def signal_revenue_momentum(
     rev["rev_lag24"] = rev["revenue"].shift(24)
     rev["cagr_2y"] = (rev["revenue"] / rev["rev_lag24"]) ** 0.5 - 1
 
-    # ── 公布日：統一用次月 11 日（保守，包含所有公司）────────────────────────
-    def _pub(d: pd.Timestamp) -> pd.Timestamp:
+    # ── 公布日：有 fetched_date 用實際抓取日，否則退回次月 10 日（保守估計）──
+    # fetched_date 由 save_monthly_revenue 在首次抓到時寫入，代表資料真實可用日
+    def _pub(d: pd.Timestamp, fetched=None) -> pd.Timestamp:
+        if fetched is not None and not pd.isna(fetched):
+            return pd.Timestamp(fetched)
         y, m = d.year, d.month
         if m == 12:
-            return pd.Timestamp(y + 1, 1, 11)
-        return pd.Timestamp(y, m + 1, 11)
+            return pd.Timestamp(y + 1, 1, 10)
+        return pd.Timestamp(y, m + 1, 10)
 
-    rev["publish_date"] = rev["date"].apply(_pub)
+    has_fetched = "fetched_date" in rev.columns
+    rev["publish_date"] = [
+        _pub(row["date"], row["fetched_date"] if has_fetched else None)
+        for _, row in rev.iterrows()
+    ]
 
     # ── 所有四條基本面條件通過的公布日 ───────────────────────────────────────
     cagr_ok = rev["cagr_2y"].isna() | (rev["cagr_2y"] > 0.05)
@@ -231,7 +238,7 @@ def signal_revenue_momentum(
     cond_red_candle = df["close"] > df["open"]      # 當日收紅K（有買盤進來）
     cond_tech = cond_above_ma60 | (cond_not_crash & cond_red_candle)
 
-    # ── 對應到第一個交易日（11 日後）────────────────────────────────────────
+    # ── 對應到 publish_date 後第一個交易日 ──────────────────────────────────
     for pub in rev_ok:
         pub_ts = pd.Timestamp(pub)
         candidates = df[df["date"] >= pub_ts]
