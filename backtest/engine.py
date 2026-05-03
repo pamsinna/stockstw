@@ -120,15 +120,27 @@ def run_backtest(
                 continue
             high_ret = (row["high"] - ep) / ep
             low_ret  = (row["low"]  - ep) / ep
+            sl_hit = low_ret <= -stop_loss
+            tp_hit = high_ret >= take_profit
 
             exit_price = None
             reason = ""
 
-            if low_ret <= -stop_loss:
-                # 停損：用 open 模擬（假設開盤跳空到停損價位附近）
+            if sl_hit and tp_hit:
+                # Both triggered intraday — daily OHLCV can't tell which fired
+                # first. Use the open as a tiebreaker: a gap-up open above TP
+                # almost certainly hit TP first; otherwise default to SL
+                # (conservative). See issue #4.
+                if row["open"] >= ep * (1 + take_profit):
+                    exit_price = ep * (1 + take_profit)
+                    reason = "take_profit"
+                else:
+                    exit_price = ep * (1 - stop_loss)
+                    reason = "stop_loss"
+            elif sl_hit:
                 exit_price = ep * (1 - stop_loss)
                 reason = "stop_loss"
-            elif high_ret >= take_profit:
+            elif tp_hit:
                 exit_price = ep * (1 + take_profit)
                 reason = "take_profit"
             elif (row["date"] - trade.entry_date).days >= max_hold_days:

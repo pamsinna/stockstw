@@ -61,6 +61,47 @@ def test_stop_loss_exit_uses_sl_price(handcrafted_price_with_signal):
     assert trade.exit_price == pytest.approx(trade.entry_price * 0.95)
 
 
+def test_same_day_sl_tp_gap_up_open_resolves_to_take_profit(handcrafted_price_with_signal):
+    """Issue #4: when SL and TP both trigger intraday, a gap-up open above
+    TP should resolve to take_profit instead of the old SL-first default."""
+    df = handcrafted_price_with_signal.copy().astype({"open": float, "high": float, "low": float})
+    # Entry day = 2024-01-05 (index 3), entry_price = 103 * (1+SLIPPAGE).
+    # On day 5 (index 5) make low pierce SL AND high pierce TP, with open
+    # already above the TP threshold (gap up).
+    entry_px = 103 * (1 + SLIPPAGE)
+    df.loc[5, "open"] = entry_px * 1.06  # > +5% TP
+    df.loc[5, "high"] = entry_px * 1.10
+    df.loc[5, "low"]  = entry_px * 0.90  # < -5% SL
+    result = run_backtest(
+        df, signal_col="signal",
+        take_profit=0.05, stop_loss=0.05, max_hold_days=999,
+        start="2024-01-01", end="2024-12-31",
+    )
+    assert len(result.trades) == 1
+    trade = result.trades[0]
+    assert trade.exit_reason == "take_profit"
+    assert trade.exit_price == pytest.approx(trade.entry_price * 1.05)
+
+
+def test_same_day_sl_tp_normal_open_resolves_to_stop_loss(handcrafted_price_with_signal):
+    """Issue #4: when SL and TP both trigger intraday and the open is between
+    them, fall back to the conservative SL-first behavior."""
+    df = handcrafted_price_with_signal.copy().astype({"open": float, "high": float, "low": float})
+    entry_px = 103 * (1 + SLIPPAGE)
+    df.loc[5, "open"] = entry_px * 1.01  # between SL and TP
+    df.loc[5, "high"] = entry_px * 1.10  # > +5% TP
+    df.loc[5, "low"]  = entry_px * 0.90  # < -5% SL
+    result = run_backtest(
+        df, signal_col="signal",
+        take_profit=0.05, stop_loss=0.05, max_hold_days=999,
+        start="2024-01-01", end="2024-12-31",
+    )
+    assert len(result.trades) == 1
+    trade = result.trades[0]
+    assert trade.exit_reason == "stop_loss"
+    assert trade.exit_price == pytest.approx(trade.entry_price * 0.95)
+
+
 def test_max_hold_exits_at_next_open(handcrafted_price_with_signal):
     df = handcrafted_price_with_signal
     # max_hold_days = 1: should exit one bar after entry (at next open).
