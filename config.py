@@ -38,6 +38,8 @@ FUNDAMENTAL_FILTERS = {
     "top_n_industry": 5,         # 同產業市值前 N 名
 }
 
+# 策略一（短線）、二（波段KD）、三（波段雙法人）OOS 期望值均為負
+# (−0.01%, −0.49%, −0.31%)；不納入即時訊號，僅供回測研究保留。
 # 短線策略參數（待回測優化）
 SHORT_TERM_PARAMS = {
     "vol_surge_ratio": 2.0,      # 成交量倍數（相對20日均量）

@@ -88,8 +88,6 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
     messages = []
 
     long_df    = signals.get("long",    pd.DataFrame())
-    short_df   = signals.get("short",   pd.DataFrame())
-    swing_df   = signals.get("swing",   pd.DataFrame())
     revenue_df = signals.get("revenue", pd.DataFrame())
 
     # 超過 10 支時按市值代理排序（收盤價 × 成交量 ≈ 當日成交金額）
@@ -172,20 +170,6 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
         "📌 <i>紀律提醒：連續虧損時不可修改參數。"
         "停損是策略的一部分，不是失敗。</i>"
     )
-
-    # ── 參考訊號 ──────────────────────────────────────────────────────────
-    ref_parts = []
-    if not short_df.empty:
-        sids = " ".join(short_df["stock_id"].head(5).tolist())
-        ref_parts.append(f"⚡ 短線參考：{sids}")
-    if not swing_df.empty:
-        sids = " ".join(swing_df["stock_id"].head(5).tolist())
-        ref_parts.append(f"📈 波段參考：{sids}")
-    if ref_parts:
-        messages.append(
-            "⚠️ <i>以下策略驗證期負期望值，僅供觀察勿重倉</i>\n"
-            + "\n".join(ref_parts)
-        )
 
     return messages
 
