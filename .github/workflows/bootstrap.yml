@@ -1,12 +1,14 @@
 name: Bootstrap DB (run once)
 
 on:
-  workflow_dispatch:  # 只能手動觸發，不自動跑
+  workflow_dispatch:  # 手動觸發；完成後若資料不足會自動重觸發
 
 jobs:
   bootstrap:
     runs-on: ubuntu-latest
     timeout-minutes: 180  # 允許 3 小時；每股 2 API calls × 6s = ~12s，3013 股需 ~4 次重跑
+    permissions:
+      actions: write  # 允許 gh workflow run 自我觸發
 
     steps:
       - name: Checkout
@@ -65,3 +67,27 @@ jobs:
           name: cache-db-bootstrap-${{ github.run_number }}
           path: data/cache.db
           retention-days: 30
+
+      # 若資料不足 2900 支，自動觸發下一輪（cache 已存好，下輪會繼續）
+      - name: Re-trigger if bootstrap incomplete
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          STOCKS=$(python3 -c "
+          import sqlite3, sys
+          try:
+              n = sqlite3.connect('data/cache.db').execute(
+                  'SELECT COUNT(DISTINCT stock_id) FROM daily_price'
+              ).fetchone()[0]
+              print(n)
+          except:
+              print(0)
+          ")
+          echo "Stocks in DB: $STOCKS"
+          if [ "$STOCKS" -lt 2900 ]; then
+            echo "Incomplete — triggering next run"
+            gh workflow run bootstrap.yml --repo ${{ github.repository }}
+          else
+            echo "Bootstrap complete"
+          fi
