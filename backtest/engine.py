@@ -134,7 +134,7 @@ def run_backtest(
                 reason = "take_profit"
             elif (row["date"] - trade.entry_date).days >= max_hold_days:
                 # 到期用次日開盤出場（與進場邏輯一致，訊號T日確認→T+1執行）
-                exit_price = next_["open"] * (1 + SLIPPAGE)
+                exit_price = next_["open"] * (1 - SLIPPAGE)
                 reason = "max_hold"
 
             if exit_price is not None:
