@@ -2,6 +2,7 @@
 資料抓取層：整合 TWSE、TPEx 官方 API（免費無限制）+ FinMind（需 token）
 TWSE/TPEx 處理日K和法人籌碼，FinMind 處理財報、月營收、興櫃特有資料
 """
+import io
 import os
 import time
 import logging
@@ -51,28 +52,29 @@ def _get(url: str, params: dict, retries: int = 3, delay: float = 1.0):
 def _parse_isin_page(mode: str, market: str) -> pd.DataFrame:
     """
     TWSE ISIN 頁面解析器（上市 strMode=2 / 上櫃 strMode=4）。
-    頁面用 colspan=7 的行當區塊標題（股票、ETF、受益憑證⋯），
-    只保留「股票」區塊，過濾掉 ETF 和其他產品。
+    頁面 colspan=7 的 section header 被 pandas 展開成所有格填同一值；
+    用 col0 == col1 偵測，只保留「股票」區塊。
     """
     url = "https://isin.twse.com.tw/isin/C_public.jsp"
     resp = _session.get(url, params={"strMode": mode}, timeout=15)
     resp.encoding = "big5"
-    tables = pd.read_html(resp.text)
+    tables = pd.read_html(io.StringIO(resp.text))
     df = tables[0].copy()
+    # 第 0 列是欄位名稱
     df.columns = df.iloc[0]
     df = df.iloc[1:].reset_index(drop=True)
 
-    col0 = df.columns[0]
-    other_cols = df.columns[1:]
+    col0 = df.columns[0]  # 有價證券代號及名稱
+    col1 = df.columns[1]  # 國際證券辨識號碼(ISIN Code)
+    col_industry = df.columns[4] if len(df.columns) > 4 else None
 
-    # section 標頭列：其他欄全部 NaN（colspan=7 的行）
-    is_header = df[other_cols].isna().all(axis=1)
+    # section header: pandas 把 colspan=7 的格展開，col0 == col1
+    is_header = df[col0].astype(str) == df[col1].astype(str)
 
-    # 對每一列標記它屬於哪個區塊
     section = ""
     sections = []
     for idx in df.index:
-        if is_header[idx]:
+        if is_header.loc[idx]:
             section = str(df.loc[idx, col0]).strip()
         sections.append(section)
     df["_section"] = sections
@@ -83,8 +85,7 @@ def _parse_isin_page(mode: str, market: str) -> pd.DataFrame:
     df[["stock_id", "stock_name"]] = df[col0].str.split("　", n=1, expand=True)
     df = df[df["stock_id"].str.match(r"^\d{4}$")].copy()
     df["market"] = market
-    industry_col = df.columns[4] if len(df.columns) > 4 else None
-    df["industry"] = df[industry_col] if industry_col else ""
+    df["industry"] = df[col_industry].fillna("") if col_industry else ""
     return df[["stock_id", "stock_name", "market", "industry"]].reset_index(drop=True)
 
 
