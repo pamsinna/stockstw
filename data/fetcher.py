@@ -48,48 +48,59 @@ def _get(url: str, params: dict, retries: int = 3, delay: float = 1.0):
 
 # ─── TWSE 官方 API ────────────────────────────────────────────────────────────
 
-def fetch_twse_stock_list() -> pd.DataFrame:
-    """取得所有上市股票清單（代號、名稱、產業）"""
+def _parse_isin_page(mode: str, market: str) -> pd.DataFrame:
+    """
+    TWSE ISIN 頁面解析器（上市 strMode=2 / 上櫃 strMode=4）。
+    頁面用 colspan=7 的行當區塊標題（股票、ETF、受益憑證⋯），
+    只保留「股票」區塊，過濾掉 ETF 和其他產品。
+    """
     url = "https://isin.twse.com.tw/isin/C_public.jsp"
-    params = {"strMode": "2"}
+    resp = _session.get(url, params={"strMode": mode}, timeout=15)
+    resp.encoding = "big5"
+    tables = pd.read_html(resp.text)
+    df = tables[0].copy()
+    df.columns = df.iloc[0]
+    df = df.iloc[1:].reset_index(drop=True)
+
+    col0 = df.columns[0]
+    other_cols = df.columns[1:]
+
+    # section 標頭列：其他欄全部 NaN（colspan=7 的行）
+    is_header = df[other_cols].isna().all(axis=1)
+
+    # 對每一列標記它屬於哪個區塊
+    section = ""
+    sections = []
+    for idx in df.index:
+        if is_header[idx]:
+            section = str(df.loc[idx, col0]).strip()
+        sections.append(section)
+    df["_section"] = sections
+
+    # 只留「股票」區塊的非標頭列
+    df = df[~is_header & df["_section"].str.contains("股票", na=False)].copy()
+
+    df[["stock_id", "stock_name"]] = df[col0].str.split("　", n=1, expand=True)
+    df = df[df["stock_id"].str.match(r"^\d{4}$")].copy()
+    df["market"] = market
+    industry_col = df.columns[4] if len(df.columns) > 4 else None
+    df["industry"] = df[industry_col] if industry_col else ""
+    return df[["stock_id", "stock_name", "market", "industry"]].reset_index(drop=True)
+
+
+def fetch_twse_stock_list() -> pd.DataFrame:
+    """取得所有上市普通股清單（過濾 ETF、受益憑證等）"""
     try:
-        resp = _session.get(url, params=params, timeout=15)
-        resp.encoding = "big5"
-        tables = pd.read_html(resp.text)
-        df = tables[0].copy()
-        df.columns = df.iloc[0]
-        df = df.iloc[1:].reset_index(drop=True)
-        # 只取普通股（代號為4碼數字）
-        col = df.columns[0]
-        df[["stock_id", "stock_name"]] = df[col].str.split("　", n=1, expand=True)
-        df = df[df["stock_id"].str.match(r"^\d{4}$")].copy()
-        df["market"] = "TWSE"
-        industry_col = df.columns[4] if len(df.columns) > 4 else None
-        df["industry"] = df[industry_col] if industry_col else ""
-        return df[["stock_id", "stock_name", "market", "industry"]].reset_index(drop=True)
+        return _parse_isin_page("2", "TWSE")
     except Exception as e:
         logger.error(f"fetch_twse_stock_list failed: {e}")
         return pd.DataFrame()
 
 
 def fetch_tpex_stock_list() -> pd.DataFrame:
-    """取得所有上櫃股票清單"""
-    url = "https://isin.twse.com.tw/isin/C_public.jsp"
-    params = {"strMode": "4"}
+    """取得所有上櫃普通股清單（過濾 ETF、受益憑證等）"""
     try:
-        resp = _session.get(url, params=params, timeout=15)
-        resp.encoding = "big5"
-        tables = pd.read_html(resp.text)
-        df = tables[0].copy()
-        df.columns = df.iloc[0]
-        df = df.iloc[1:].reset_index(drop=True)
-        col = df.columns[0]
-        df[["stock_id", "stock_name"]] = df[col].str.split("　", n=1, expand=True)
-        df = df[df["stock_id"].str.match(r"^\d{4}$")].copy()
-        df["market"] = "TPEx"
-        industry_col = df.columns[4] if len(df.columns) > 4 else None
-        df["industry"] = df[industry_col] if industry_col else ""
-        return df[["stock_id", "stock_name", "market", "industry"]].reset_index(drop=True)
+        return _parse_isin_page("4", "TPEx")
     except Exception as e:
         logger.error(f"fetch_tpex_stock_list failed: {e}")
         return pd.DataFrame()
