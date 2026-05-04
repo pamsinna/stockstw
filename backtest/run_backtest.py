@@ -69,7 +69,9 @@ def _ensure_taiex_proxy(start: str = DATA_START) -> None:
     last = last_price_date(TAIEX_PROXY)
     fetch_start = last or start
     price = fetch_price(TAIEX_PROXY, fetch_start)
-    if not price.empty:
+    if price is None:
+        logger.warning("0050 fetch returned 402/403 — using cached data if available")
+    elif not price.empty:
         save_prices(TAIEX_PROXY, price)
         logger.info(f"0050 (TAIEX proxy) updated: {len(price)} rows")
 
@@ -156,7 +158,7 @@ def download_revenue(universe: pd.DataFrame,
             continue
         fetch_start = last or start
         rev = fetch_monthly_revenue(sid, fetch_start)  # rate-limited inside _finmind()
-        if not rev.empty:
+        if rev is not None and not rev.empty:
             _normalize_and_save_revenue(sid, rev)
 
     if skipped:

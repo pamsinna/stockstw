@@ -54,11 +54,11 @@ def incremental_update(universe: pd.DataFrame) -> None:
             continue
 
         price = fetch_price(sid, last)  # rate-limited inside _finmind()
-        if not price.empty:
+        if price is not None and not price.empty:
             save_prices(sid, price)
 
         inst = fetch_institutional(sid, last)  # rate-limited inside _finmind()
-        if not inst.empty:
+        if inst is not None and not inst.empty:
             save_institutional(sid, inst)
 
     # 月營收：每月 1～10 號才抓（法規要求 10 號前公布，提早抓以第一時間收到）
@@ -75,7 +75,7 @@ def incremental_update(universe: pd.DataFrame) -> None:
             for sid in tqdm(rev_targets, desc="Revenue"):
                 fetch_start = last_revenue_date(sid) or DATA_START
                 rev = fetch_monthly_revenue(sid, fetch_start)  # rate-limited inside _finmind()
-                if not rev.empty:
+                if rev is not None and not rev.empty:
                     _normalize_and_save_revenue(sid, rev)
 
 
