@@ -69,26 +69,16 @@ jobs:
           path: data/cache.db
           retention-days: 30
 
-      # 若資料不足 2900 支，自動觸發下一輪（cache 已存好，下輪會繼續）
-      - name: Re-trigger if bootstrap incomplete
+      - name: Report stock count
         if: always()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          STOCKS=$(python3 -c "
-          import sqlite3, sys
+          python3 -c "
+          import sqlite3
           try:
               n = sqlite3.connect('data/cache.db').execute(
                   'SELECT COUNT(DISTINCT stock_id) FROM daily_price'
               ).fetchone()[0]
-              print(n)
-          except:
-              print(0)
-          ")
-          echo "Stocks in DB: $STOCKS"
-          if [ "$STOCKS" -lt 2900 ]; then
-            echo "Incomplete — triggering next run"
-            gh workflow run bootstrap.yml --repo ${{ github.repository }}
-          else
-            echo "Bootstrap complete"
-          fi
+              print(f'Stocks in DB: {n}')
+          except Exception as e:
+              print(f'Could not read DB: {e}')
+          "
