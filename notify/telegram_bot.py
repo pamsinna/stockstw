@@ -12,8 +12,8 @@ from dotenv import load_dotenv
 load_dotenv(override=True)
 logger = logging.getLogger(__name__)
 
-TOKEN   = os.getenv("TELEGRAM_TOKEN", "")
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+TOKEN   = os.getenv("TELEGRAM_TOKEN", "").strip()
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 API_URL = f"https://api.telegram.org/bot{TOKEN}"
 
 MARKET_EMOJI = {"TWSE": "🔵", "TPEx": "🟢", "Emerging": "🟡"}
