@@ -8,6 +8,7 @@ import logging
 import requests
 import pandas as pd
 from dotenv import load_dotenv
+from data.cache import load_universe
 
 load_dotenv(override=True)
 logger = logging.getLogger(__name__)
@@ -78,6 +79,14 @@ def _append_signal_log(long_df: pd.DataFrame, date: str) -> None:
         new_df.to_csv(SIGNAL_LOG, index=False)
 
 
+def _name_map() -> dict[str, str]:
+    try:
+        u = load_universe()
+        return dict(zip(u["stock_id"], u["stock_name"])) if not u.empty else {}
+    except Exception:
+        return {}
+
+
 def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
     """
     只主推策略四（中長線）。
@@ -85,6 +94,7 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
     附近期績效監控與執行紀律提醒。
     """
     messages = []
+    names = _name_map()
 
     long_df    = signals.get("long",    pd.DataFrame())
     revenue_df = signals.get("revenue", pd.DataFrame())
@@ -137,8 +147,9 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
             inst  = row.get("inst_total", 0)
             inst_str = f"+{int(inst//1000)}K" if inst > 0 else f"{int(inst//1000)}K"
             bb_str = f"{bb*100:.0f}%" if not pd.isna(bb) else "—"
+            name = names.get(sid, "")
             lines.append(
-                f"{emoji} <b>{sid}</b>  ${close}  "
+                f"{emoji} <b>{sid} {name}</b>  ${close}  "
                 f"BB{bb_str}  KD{kd:.0f}  RSI{rsi:.0f}  法人{inst_str}"
             )
         messages.append("\n".join(lines))
@@ -158,8 +169,9 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
             rsi   = row.get("rsi", 0)
             inst  = row.get("inst_total", 0)
             inst_str = f"+{int(inst//1000)}K" if inst > 0 else f"{int(inst//1000)}K"
+            name = names.get(sid, "")
             rev_lines.append(
-                f"{emoji} <b>{sid}</b>  ${close}  RSI{rsi:.0f}  法人{inst_str}"
+                f"{emoji} <b>{sid} {name}</b>  ${close}  RSI{rsi:.0f}  法人{inst_str}"
             )
         messages.append("\n".join(rev_lines))
 
