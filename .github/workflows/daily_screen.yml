@@ -53,9 +53,10 @@ jobs:
 
       - name: Run daily screen
         env:
-          FINMIND_TOKEN:    ${{ secrets.FINMIND_TOKEN }}
-          TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          FINMIND_TOKEN:       ${{ secrets.FINMIND_TOKEN }}
+          TELEGRAM_TOKEN:      ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID:    ${{ secrets.TELEGRAM_CHAT_ID }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: python main.py screen
 
       # 更新後的 DB 存回 cache，下次跑只需補 1 天資料

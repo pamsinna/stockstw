@@ -1,6 +1,6 @@
 # stockstw
 
-台股自動選股 + 回測系統。每天早上 8:00（台灣時間）由 GitHub Actions 跑增量更新 → 大盤過濾 → 五個策略訊號 → Telegram 推播。所有資料落地於本地 SQLite (`data/cache.db`)，避免重複打 API。
+台股自動選股 + 回測系統。每天早上 8:00（台灣時間）由 GitHub Actions 跑增量更新 → 大盤過濾 → 五個策略訊號 → 推播到 Telegram 與 / 或 Discord。所有資料落地於本地 SQLite (`data/cache.db`)，避免重複打 API。
 
 策略可信度落差很大 — 只有「策略四（中長線品質股低接）」通過樣本外驗證並推為主力。完整脈絡與實際績效見 [`選股邏輯說明.txt`](./選股邏輯說明.txt)，動策略邏輯前先讀。
 
@@ -24,9 +24,47 @@ python -m backtest.run_backtest --mode optimize --strategy 0
 python -m backtest.benchmark    # 策略四 vs 0050 對照組顯著性測試
 ```
 
-需要的 secrets（`.env` 或 GitHub Actions secrets）：`FINMIND_TOKEN`、`TELEGRAM_TOKEN`、`TELEGRAM_CHAT_ID`。
+需要的 secrets（`.env` 或 GitHub Actions secrets）：
 
-無測試套件 — 驗證邏輯靠 `python main.py backtest` 跑歷史回測比對指標。
+- `FINMIND_TOKEN` — 必填，免費註冊：<https://finmindtrade.com/>
+- 推播至少設一組（兩組都設則同步推到兩邊）：
+  - **Telegram**：`TELEGRAM_TOKEN` + `TELEGRAM_CHAT_ID`
+  - **Discord**：`DISCORD_WEBHOOK_URL`
+
+測試指令：`pytest`（共 43 個單元測試，~0.2 秒跑完）。策略邏輯驗證另靠 `python main.py backtest` 跑歷史回測比對指標。
+
+## 推播設定
+
+`notify/__init__.py` 是 dispatcher，根據環境變數自動判斷要推到哪些平台。沒設任何一組則 log 一行警告、不會 crash。
+
+### Discord（最簡單，只要一個 URL）
+
+1. 在 Discord 開一個 server（或用既有的）；左側欄底部 **「+」** → 建立伺服器 → 給自己用
+2. 進入想接收訊號的頻道 → **齒輪 ⚙️** → **整合 (Integrations)** → **Webhooks** → **新增 Webhook**
+3. 點 **複製 Webhook URL**，會是類似這樣：
+   ```
+   https://discord.com/api/webhooks/<id>/<token>
+   ```
+4. 貼到 `.env`：
+   ```bash
+   DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/<id>/<token>
+   ```
+5. 部署到 GitHub Actions：repo → **Settings → Secrets and variables → Actions** → **New repository secret**，名稱 `DISCORD_WEBHOOK_URL`，值貼上 URL。`daily_screen.yml` 已經 wired 好。
+
+⚠️ Webhook URL 等於密碼，**不要 commit、不要貼到公開地方**。外洩了就回頻道刪掉重建一個，舊的立刻失效。
+
+訊息會自動把 Telegram 的 `<b>` / `<i>` 轉成 Markdown，超過 2000 字會依行切成多則（Discord 單則上限）。
+
+### Telegram
+
+1. 在 Telegram 找 [@BotFather](https://t.me/BotFather) → `/newbot` → 取得 `TELEGRAM_TOKEN`
+2. 把 bot 加進你要接收的 group / channel，或直接和 bot 開對話
+3. 找出 `chat_id`：傳一句話給 bot 後開 `https://api.telegram.org/bot<TOKEN>/getUpdates`，回應 JSON 裡 `chat.id` 就是
+4. `.env`：
+   ```bash
+   TELEGRAM_TOKEN=<bot token>
+   TELEGRAM_CHAT_ID=<chat id>
+   ```
 
 ## Architecture
 
@@ -49,7 +87,9 @@ backtest/optimizer.py   ── grid_search + pick_best
 backtest/benchmark.py   ── 策略 vs 0050 配對檢定（t-test、alpha）
    ↓
 screener/daily_run.py   ── 增量更新 → screen_today → 落 CSV
-notify/telegram_bot.py  ── HTML 訊息格式化 + 勝率監控提示
+notify/telegram_bot.py  ── HTML 訊息格式化 + 勝率監控提示（format_signals 共用）
+notify/discord_bot.py   ── Webhook 推播（HTML→Markdown、2000 字分段）
+notify/__init__.py      ── Dispatcher：依環境變數路由到 Telegram / Discord / 兩者
 ```
 
 ### Critical invariants — don't break these
