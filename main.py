@@ -19,7 +19,7 @@ def main() -> None:
 
     if mode == "screen":
         from screener.daily_run import run_daily
-        from notify.telegram_bot import notify
+        from notify import notify
         run_daily(notify_fn=notify)
 
     elif mode == "backtest":

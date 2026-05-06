@@ -38,9 +38,10 @@ jobs:
 
       - name: Run daily screen
         env:
-          FINMIND_TOKEN:    ${{ secrets.FINMIND_TOKEN }}
-          TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          FINMIND_TOKEN:       ${{ secrets.FINMIND_TOKEN }}
+          TELEGRAM_TOKEN:      ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID:    ${{ secrets.TELEGRAM_CHAT_ID }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: python main.py screen
 
       # 上傳今日報告為 artifact（保留 7 天）
