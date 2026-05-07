@@ -2,6 +2,10 @@
 股票池管理：以 TWSE ISIN 官方頁面為來源（上市 + 上櫃普通股）
 解析 section header 確保只保留「股票」區塊，排除 ETF、受益憑證等。
 """
+
+EXCLUDED_INDUSTRIES: set[str] = {
+    "食品工業",
+}
 import logging
 import pandas as pd
 from data.fetcher import fetch_twse_stock_list, fetch_tpex_stock_list
@@ -13,6 +17,7 @@ logger = logging.getLogger(__name__)
 def build_universe(force_refresh: bool = False) -> pd.DataFrame:
     existing = load_universe()
     if not existing.empty and not force_refresh:
+        existing = existing[~existing["industry"].isin(EXCLUDED_INDUSTRIES)].reset_index(drop=True)
         logger.info(f"Universe loaded from cache: {len(existing)} stocks")
         return existing
 
@@ -29,6 +34,12 @@ def build_universe(force_refresh: bool = False) -> pd.DataFrame:
     if df.empty:
         logger.error("Universe empty after merge")
         return pd.DataFrame()
+
+    before = len(df)
+    df = df[~df["industry"].isin(EXCLUDED_INDUSTRIES)].reset_index(drop=True)
+    excluded = before - len(df)
+    if excluded:
+        logger.info(f"Excluded {excluded} stocks from industries: {EXCLUDED_INDUSTRIES}")
 
     save_universe(df)
     counts = df["market"].value_counts().to_dict()
