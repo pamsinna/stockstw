@@ -54,6 +54,19 @@ def main() -> None:
         logging.info(f"Universe: {len(universe)} stocks")
         download_revenue(universe)
 
+    elif mode == "download-financial":
+        import logging
+        from data.cache import init_db
+        from data.universe import build_universe
+        from backtest.run_backtest import download_financial
+        init_db()
+        universe = build_universe()
+        if universe.empty or "stock_id" not in universe.columns:
+            logging.error("Universe is empty — check FINMIND_TOKEN secret")
+            sys.exit(1)
+        logging.info(f"Universe: {len(universe)} stocks")
+        download_financial(universe)
+
     elif mode == "download-per":
         import logging
         from data.cache import init_db
@@ -75,7 +88,7 @@ def main() -> None:
         ])
 
     else:
-        print("Usage: python main.py [screen|backtest|download|download-revenue|download-per|optimize]")
+        print("Usage: python main.py [screen|backtest|download|download-revenue|download-per|download-financial|optimize]")
         sys.exit(1)
 
 

@@ -36,7 +36,14 @@ def calc_fundamentals(stock_id: str) -> dict:
     }
 
     if fin.empty:
-        return result  # passes_filter = False：無財報資料視為不合格
+        # 有財報資料但該股票無資料 → 不合格
+        # 但若整個 financial 表是空的（bootstrap 未完成），改為放行避免 0 訊號
+        from data.cache import _conn
+        with _conn() as _c:
+            total = _c.execute("SELECT COUNT(*) FROM financial").fetchone()[0]
+        if total == 0:
+            result["passes_filter"] = True  # bootstrap 尚未下載財報，暫不過濾
+        return result
 
     try:
         result.update(_calc_eps_roe(fin))

@@ -14,10 +14,12 @@ from data.cache import (
     init_db, load_prices, load_institutional,
     save_prices, save_institutional, save_monthly_revenue, last_price_date,
     load_monthly_revenue, last_revenue_date, mark_fetch_skip,
-    save_per, last_per_date, load_per,
+    save_per, last_per_date, load_per, save_financial,
 )
 from data.universe import build_universe
-from data.fetcher import fetch_price, fetch_institutional, fetch_monthly_revenue, fetch_per
+from data.fetcher import (fetch_price, fetch_institutional, fetch_monthly_revenue,
+                          fetch_per, fetch_financial_statement, fetch_balance_sheet,
+                          fetch_cash_flow)
 from technical.signals import STRATEGIES
 from backtest.engine import run_portfolio_backtest
 from backtest.metrics import calc_metrics, print_report
@@ -164,6 +166,34 @@ def download_revenue(universe: pd.DataFrame,
 
     if skipped:
         logger.info(f"Skipped {skipped} stocks with recent revenue data")
+
+
+def download_financial(universe: pd.DataFrame,
+                       start: str = DATA_START,
+                       max_stocks: int | None = None) -> None:
+    """財報三表下載（損益表、資產負債表、現金流量表）。季更新，可重跑。"""
+    stocks = sorted(universe["stock_id"].tolist())
+    if max_stocks:
+        stocks = stocks[:max_stocks]
+
+    logger.info(f"Downloading financial statements for {len(stocks)} stocks (3 datasets each)...")
+    for sid in tqdm(stocks, desc="Financial"):
+        for fetch_fn, label in [
+            (fetch_financial_statement, "stmt"),
+            (fetch_balance_sheet,       "bs"),
+            (fetch_cash_flow,           "cf"),
+        ]:
+            df = fetch_fn(sid, start)
+            if df is None:
+                mark_fetch_skip(sid, f"fin_{label}")
+            elif not df.empty:
+                df = df.copy()
+                df["stock_id"] = sid
+                if "date" in df.columns:
+                    df["date"] = df["date"].astype(str)
+                save_financial(sid, df)
+
+    logger.info("Financial download complete")
 
 
 def download_per(universe: pd.DataFrame,
