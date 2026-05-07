@@ -13,7 +13,7 @@ from tqdm import tqdm
 
 from config import DATA_START
 from data.cache import (
-    init_db, load_prices, load_institutional, load_monthly_revenue,
+    init_db, load_prices, load_institutional, load_monthly_revenue, load_per,
     save_prices, save_institutional, last_price_date, last_revenue_date,
 )
 from data.universe import build_universe
@@ -134,16 +134,19 @@ def screen_today(universe: pd.DataFrame,
         inst_arg = inst if not inst.empty else None
         market = market_map.get(sid, "TWSE")
 
+        per = load_per(sid, start="2020-01-01")
+        per_arg = per if not per.empty else None
+
         try:
             if sid in fund_ok:
-                df_l = signal_longterm_quality_entry(price, inst_arg, market_filter=strict_mf)
+                df_l = signal_longterm_quality_entry(price, inst_arg, per_df=per_arg, market_filter=strict_mf)
                 if bool(df_l.iloc[-1]["signal_long"]):
                     results["long"].append(_summary_row(sid, market, df_l, "long"))
 
             # 策略五：月營收動能（每月 10 日後第一個交易日才會有訊號）
             rev = load_monthly_revenue(sid)
             rev_arg = rev if not rev.empty else None
-            df_rv = signal_revenue_momentum(price, inst_arg, rev_arg, market_filter=mf)
+            df_rv = signal_revenue_momentum(price, inst_arg, rev_arg, per_df=per_arg, market_filter=mf)
             if bool(df_rv.iloc[-1]["signal_rev"]):
                 results["revenue"].append(_summary_row(sid, market, df_rv, "revenue"))
 
