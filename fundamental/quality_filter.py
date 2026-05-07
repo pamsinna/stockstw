@@ -36,8 +36,7 @@ def calc_fundamentals(stock_id: str) -> dict:
     }
 
     if fin.empty:
-        result["passes_filter"] = True  # 無財報資料時不過濾，讓技術面決定
-        return result
+        return result  # passes_filter = False：無財報資料視為不合格
 
     try:
         result.update(_calc_eps_roe(fin))
