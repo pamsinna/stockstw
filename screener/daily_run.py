@@ -64,7 +64,13 @@ def incremental_update(universe: pd.DataFrame) -> None:
     # 月營收：每月 1～10 號才抓（法規要求 10 號前公布，提早抓以第一時間收到）
     today = datetime.now(_TZ)
     if today.day <= 10:
-        stale_before = (today - timedelta(days=35)).strftime("%Y-%m-%d")
+        # 以「上個月1日」為 stale 基準：避免 today-35天 比月初早一天造成全量重跑
+        # 例如：5月7日 → stale_before = 2026-04-01；有四月營收的股票全部跳過
+        # 6月1日 → stale_before = 2026-05-01；四月營收股票重跑（找五月資料）← 正確
+        y, m = today.year, today.month - 1
+        if m == 0:
+            y, m = y - 1, 12
+        stale_before = f"{y}-{m:02d}-01"
         rev_targets = [
             sid for sid in stocks_to_update
             if (last_revenue_date(sid) or DATA_START) < stale_before
