@@ -98,13 +98,13 @@ def signal_longterm_quality_entry(df: pd.DataFrame,
     cond_bb = (df["bb_pct"] > 0.3) & (df["bb_pct"] < 0.85)
     # RSI 未過熱
     cond_rsi = df["rsi"] < 70
-    # 法人 60 日累計淨買超：外資或投信至少一方長線收貨
+    # 法人 60 日累計淨買超：外資 + 投信合計 > 0（OR 改為加總，避免一買一大賣仍過關）
     if "foreign_" in df.columns or "trust" in df.columns:
         f_60d = (df["foreign_"].rolling(60, min_periods=30).sum()
                  if "foreign_" in df.columns else pd.Series(0.0, index=df.index))
         t_60d = (df["trust"].rolling(60, min_periods=30).sum()
                  if "trust" in df.columns else pd.Series(0.0, index=df.index))
-        cond_inst_accum = (f_60d > 0) | (t_60d > 0)
+        cond_inst_accum = (f_60d + t_60d) > 0
     else:
         cond_inst_accum = pd.Series(True, index=df.index)
 
