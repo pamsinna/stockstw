@@ -14,9 +14,10 @@ from data.cache import (
     init_db, load_prices, load_institutional,
     save_prices, save_institutional, save_monthly_revenue, last_price_date,
     load_monthly_revenue, last_revenue_date, mark_fetch_skip,
+    save_per, last_per_date,
 )
 from data.universe import build_universe
-from data.fetcher import fetch_price, fetch_institutional, fetch_monthly_revenue
+from data.fetcher import fetch_price, fetch_institutional, fetch_monthly_revenue, fetch_per
 from technical.signals import STRATEGIES
 from backtest.engine import run_portfolio_backtest
 from backtest.metrics import calc_metrics, print_report
@@ -163,6 +164,33 @@ def download_revenue(universe: pd.DataFrame,
 
     if skipped:
         logger.info(f"Skipped {skipped} stocks with recent revenue data")
+
+
+def download_per(universe: pd.DataFrame,
+                 start: str = DATA_START,
+                 max_stocks: int | None = None) -> None:
+    """每日本益比、股價淨值比、殖利率獨立下載"""
+    stocks = sorted(universe["stock_id"].tolist())
+    if max_stocks:
+        stocks = stocks[:max_stocks]
+
+    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    logger.info(f"Downloading daily PER/PBR for {len(stocks)} stocks...")
+    skipped = 0
+    for sid in tqdm(stocks, desc="PER"):
+        last = last_per_date(sid)
+        if last and last >= yesterday:
+            skipped += 1
+            continue
+        fetch_start = last or start
+        per = fetch_per(sid, fetch_start)
+        if per is None:
+            mark_fetch_skip(sid, "per")
+        elif not per.empty:
+            save_per(sid, per)
+
+    if skipped:
+        logger.info(f"Skipped {skipped} already up-to-date stocks")
 
 
 # ─── 策略回測 ─────────────────────────────────────────────────────────────────

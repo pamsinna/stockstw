@@ -77,6 +77,15 @@ def init_db() -> None:
         PRIMARY KEY (stock_id, date)
     );
 
+    CREATE TABLE IF NOT EXISTS daily_per (
+        stock_id  TEXT NOT NULL,
+        date      TEXT NOT NULL,
+        per       REAL,
+        pbr       REAL,
+        div_yield REAL,
+        PRIMARY KEY (stock_id, date)
+    );
+
     CREATE TABLE IF NOT EXISTS fetch_log (
         stock_id   TEXT NOT NULL,
         dataset    TEXT NOT NULL,
@@ -264,3 +273,43 @@ def load_monthly_revenue(stock_id: str) -> pd.DataFrame:
     if not df.empty:
         df["date"] = pd.to_datetime(df["date"])
     return df
+
+
+# ─── daily_per ────────────────────────────────────────────────────────────────
+
+def save_per(stock_id: str, df: pd.DataFrame) -> None:
+    if df.empty:
+        return
+    df = df.copy()
+    df["stock_id"] = stock_id
+    df["date"] = df["date"].astype(str)
+    with _conn() as con:
+        df.to_sql("daily_per", con, if_exists="append", index=False,
+                  method=_insert_or_ignore)
+        con.execute(
+            "INSERT OR REPLACE INTO fetch_log VALUES (?,?,?)",
+            (stock_id, "per", df["date"].max())
+        )
+
+
+def load_per(stock_id: str, start: str = "2018-01-01", end: str = "") -> pd.DataFrame:
+    q = "SELECT * FROM daily_per WHERE stock_id=? AND date>=?"
+    params: list = [stock_id, start]
+    if end:
+        q += " AND date<=?"
+        params.append(end)
+    q += " ORDER BY date"
+    with _conn() as con:
+        df = pd.read_sql(q, con, params=params)
+    if not df.empty:
+        df["date"] = pd.to_datetime(df["date"])
+    return df
+
+
+def last_per_date(stock_id: str) -> str | None:
+    with _conn() as con:
+        row = con.execute(
+            "SELECT last_date FROM fetch_log WHERE stock_id=? AND dataset='per'",
+            (stock_id,)
+        ).fetchone()
+    return row[0] if row else None

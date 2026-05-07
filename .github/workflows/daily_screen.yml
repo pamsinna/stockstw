@@ -2,8 +2,8 @@ name: Daily Stock Screen
 
 on:
   schedule:
-    # 台灣時間每日 06:00（UTC 22:00 前一天，週日～週四）
-    - cron: "0 22 * * 0-4"
+    # 台灣時間約 06:00（UTC 21:00，提早 1 小時補 GitHub Actions 排程 delay）
+    - cron: "0 21 * * 0-4"
   workflow_dispatch:  # 允許手動觸發
 
 jobs:

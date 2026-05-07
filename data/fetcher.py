@@ -200,6 +200,19 @@ def fetch_monthly_revenue(stock_id: str, start: str) -> pd.DataFrame:
     return _finmind("TaiwanStockMonthRevenue", stock_id, start)
 
 
+def fetch_per(stock_id: str, start: str) -> pd.DataFrame | None:
+    """每日本益比、股價淨值比、殖利率。回傳 None 代表 402/403 永久跳過。"""
+    df = _finmind("TaiwanStockPER", stock_id, start)
+    if df is None:
+        return None
+    if df.empty:
+        return df
+    df = df.rename(columns={"PER": "per", "PBR": "pbr", "dividend_yield": "div_yield"})
+    needed = ["date", "per", "pbr", "div_yield"]
+    existing = [c for c in needed if c in df.columns]
+    return df[existing].sort_values("date").reset_index(drop=True)
+
+
 def fetch_stock_list_finmind() -> pd.DataFrame:
     """FinMind 股票清單（含興櫃）"""
     params = {"dataset": "TaiwanStockInfo", "token": FINMIND_TOKEN}
