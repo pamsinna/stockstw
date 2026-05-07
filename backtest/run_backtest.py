@@ -14,7 +14,7 @@ from data.cache import (
     init_db, load_prices, load_institutional,
     save_prices, save_institutional, save_monthly_revenue, last_price_date,
     load_monthly_revenue, last_revenue_date, mark_fetch_skip,
-    save_per, last_per_date,
+    save_per, last_per_date, load_per,
 )
 from data.universe import build_universe
 from data.fetcher import fetch_price, fetch_institutional, fetch_monthly_revenue, fetch_per
@@ -232,6 +232,7 @@ def run_all_strategies(universe: pd.DataFrame,
         logger.info(f"Preparing signals for [{name}]...")
 
         needs_rev   = strategy.get("needs_revenue", False)
+        needs_per   = strategy.get("needs_per", False)
         use_strict  = strategy.get("strict_market", False)
         active_mf   = strict_market_filter if use_strict else market_filter
 
@@ -244,6 +245,9 @@ def run_all_strategies(universe: pd.DataFrame,
             if needs_rev:
                 rev = load_monthly_revenue(sid)
                 extra["rev_df"] = rev if not rev.empty else None
+            if needs_per:
+                per = load_per(sid, start=DATA_START, end=end)
+                extra["per_df"] = per if not per.empty else None
             try:
                 df = signal_fn(
                     price,

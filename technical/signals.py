@@ -76,8 +76,15 @@ def signal_swing_ma_kd_inst(df: pd.DataFrame,
 # ─── 中長線策略（1～3個月）───────────────────────────────────────────────────
 # 核心邏輯：均線多頭 + MACD 金叉翻正 + 布林下軌反彈（逢低進場）
 
+def _merge_per(df: pd.DataFrame, per_df: pd.DataFrame) -> pd.DataFrame:
+    """把每日 PER 合併進價格 DataFrame（left join on date）。"""
+    per = per_df[["date", "per"]].rename(columns={"per": "_per"})
+    return df.merge(per, on="date", how="left")
+
+
 def signal_longterm_quality_entry(df: pd.DataFrame,
                                    inst_df: pd.DataFrame | None = None,
+                                   per_df: pd.DataFrame | None = None,
                                    market_filter: pd.Series | None = None) -> pd.DataFrame:
     df = add_all(df)
     if inst_df is not None and not inst_df.empty:
@@ -92,7 +99,6 @@ def signal_longterm_quality_entry(df: pd.DataFrame,
     # RSI 未過熱
     cond_rsi = df["rsi"] < 70
     # 法人 60 日累計淨買超：外資或投信至少一方長線收貨
-    # 偷收貨不會連買，所以看 60 日累計而非連續天數
     if "foreign_" in df.columns or "trust" in df.columns:
         f_60d = (df["foreign_"].rolling(60, min_periods=30).sum()
                  if "foreign_" in df.columns else pd.Series(0.0, index=df.index))
@@ -102,7 +108,14 @@ def signal_longterm_quality_entry(df: pd.DataFrame,
     else:
         cond_inst_accum = pd.Series(True, index=df.index)
 
-    df["signal_long"] = (cond_above_ma60 & cond_macd & cond_bb & cond_rsi & cond_inst_accum)
+    # PER 過濾：0 < PER < 20（有獲利且不過貴）；無資料時放行
+    if per_df is not None and not per_df.empty:
+        df = _merge_per(df, per_df)
+        cond_per = (df["_per"] > 0) & (df["_per"] < 20) | df["_per"].isna()
+    else:
+        cond_per = pd.Series(True, index=df.index)
+
+    df["signal_long"] = (cond_above_ma60 & cond_macd & cond_bb & cond_rsi & cond_inst_accum & cond_per)
     return _apply_market_filter(df, "signal_long", market_filter)
 
 
@@ -144,6 +157,7 @@ def signal_revenue_momentum(
     df: pd.DataFrame,
     inst_df: pd.DataFrame | None = None,
     rev_df: pd.DataFrame | None = None,
+    per_df: pd.DataFrame | None = None,
     market_filter: pd.Series | None = None,
 ) -> pd.DataFrame:
     """
@@ -234,9 +248,15 @@ def signal_revenue_momentum(
     # ── 技術面：站上 MA60，或近 5 日不崩跌且已止跌 ──────────────────────────
     df["_ret_5d"]   = df["close"] / df["close"].shift(5) - 1
     cond_above_ma60 = df["close"] > df["ma60"]
-    cond_not_crash  = df["_ret_5d"] > -0.08        # 近 5 日沒跌超過 8%
-    cond_red_candle = df["close"] > df["open"]      # 當日收紅K（有買盤進來）
+    cond_not_crash  = df["_ret_5d"] > -0.08
+    cond_red_candle = df["close"] > df["open"]
     cond_tech = cond_above_ma60 | (cond_not_crash & cond_red_candle)
+
+    # ── PER 過濾：0 < PER < 20；無資料時放行 ────────────────────────────────
+    if per_df is not None and not per_df.empty:
+        df = _merge_per(df, per_df)
+    else:
+        df["_per"] = float("nan")
 
     # ── 對應到 publish_date 後第一個交易日 ──────────────────────────────────
     for pub in rev_ok:
@@ -252,11 +272,14 @@ def signal_revenue_momentum(
             (df.loc[day_mask, "_foreign_20d"] >=
              df.loc[day_mask, "_inst_threshold"]).any()
         )
-        if tech_ok and inst_ok:
+        per_val = df.loc[day_mask, "_per"].iloc[0] if day_mask.any() else float("nan")
+        per_ok  = pd.isna(per_val) or (0 < per_val < 20)
+
+        if tech_ok and inst_ok and per_ok:
             df.loc[day_mask, "signal_rev"] = True
 
     df.drop(columns=["_foreign_20d", "_inst_threshold", "_vol_20d_avg",
-                      "_ret_5d"], errors="ignore", inplace=True)
+                      "_ret_5d", "_per"], errors="ignore", inplace=True)
     return _apply_market_filter(df, "signal_rev", market_filter)
 
 
@@ -343,6 +366,7 @@ STRATEGIES = [
         "timeframe": "long",
         "default_tp": 0.30, "default_sl": 0.10, "default_hold": 90,
         "strict_market": True,
+        "needs_per": True,
     },
     {
         "name": "月營收動能",
@@ -351,5 +375,6 @@ STRATEGIES = [
         "timeframe": "revenue",
         "default_tp": 0.40, "default_sl": 0.12, "default_hold": 120,
         "needs_revenue": True,
+        "needs_per": True,
     },
 ]
