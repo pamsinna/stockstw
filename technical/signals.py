@@ -213,12 +213,15 @@ def signal_revenue_momentum(
     # ── 公布日：有 fetched_date 用實際抓取日，否則退回次月 10 日（保守估計）──
     # fetched_date 由 save_monthly_revenue 在首次抓到時寫入，代表資料真實可用日
     def _pub(d: pd.Timestamp, fetched=None) -> pd.Timestamp:
-        if fetched is not None and not pd.isna(fetched):
-            return pd.Timestamp(fetched)
         y, m = d.year, d.month
-        if m == 12:
-            return pd.Timestamp(y + 1, 1, 10)
-        return pd.Timestamp(y, m + 1, 10)
+        default = pd.Timestamp(y + 1, 1, 10) if m == 12 else pd.Timestamp(y, m + 1, 10)
+        if fetched is not None and not pd.isna(fetched):
+            fetched_ts = pd.Timestamp(fetched)
+            # 只在 fetched_date 落於預期發布窗口 ±20 天內才採用
+            # 避免 bootstrap 把所有歷史資料的 fetched_date 設成同一天造成訊號爆炸
+            if abs((fetched_ts - default).days) <= 20:
+                return fetched_ts
+        return default
 
     has_fetched = "fetched_date" in rev.columns
     rev["publish_date"] = [
