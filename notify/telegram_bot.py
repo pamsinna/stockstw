@@ -147,13 +147,17 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
             kd    = row.get("kd_k", 0)
             rsi   = row.get("rsi", 0)
             bb    = row.get("bb_pct", float("nan"))
-            inst  = row.get("inst_total", 0)
-            inst_str = f"+{int(inst//1000)}K" if inst > 0 else f"{int(inst//1000)}K"
-            bb_str = f"{bb*100:.0f}%" if not pd.isna(bb) else "—"
+            per   = row.get("per", float("nan"))
+            f60   = row.get("f_60d", float("nan"))
+            t60   = row.get("t_60d", float("nan"))
+            bb_str  = f"{bb*100:.0f}%" if not pd.isna(bb) else "—"
+            per_str = f"{per:.0f}" if not pd.isna(per) and per > 0 else "—"
+            inst60  = (0 if pd.isna(f60) else f60) + (0 if pd.isna(t60) else t60)
+            inst_str = f"+{int(inst60//1000)}K" if inst60 > 0 else f"{int(inst60//1000)}K"
             name = names.get(sid, "")
             lines.append(
                 f"{emoji} <b>{sid} {name}</b>  ${close}  "
-                f"BB{bb_str}  KD{kd:.0f}  RSI{rsi:.0f}  法人{inst_str}"
+                f"BB{bb_str}  KD{kd:.0f}  RSI{rsi:.0f}  PER{per_str}  法人60日{inst_str}"
             )
         messages.append("\n".join(lines))
         _append_signal_log(long_df, date)
@@ -170,11 +174,17 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
             sid   = row["stock_id"]
             close = row.get("close", "—")
             rsi   = row.get("rsi", 0)
-            inst  = row.get("inst_total", 0)
-            inst_str = f"+{int(inst//1000)}K" if inst > 0 else f"{int(inst//1000)}K"
+            per   = row.get("per", float("nan"))
+            yoy   = row.get("revenue_yoy", float("nan"))
+            f20   = row.get("f_20d", float("nan"))
+            per_str = f"{per:.0f}" if not pd.isna(per) and per > 0 else "—"
+            yoy_str = f"+{yoy:.0f}%" if not pd.isna(yoy) else "—"
+            f20_val = 0 if pd.isna(f20) else f20
+            f20_str = f"+{int(f20_val//1000)}K" if f20_val > 0 else f"{int(f20_val//1000)}K"
             name = names.get(sid, "")
             rev_lines.append(
-                f"{emoji} <b>{sid} {name}</b>  ${close}  RSI{rsi:.0f}  法人{inst_str}"
+                f"{emoji} <b>{sid} {name}</b>  ${close}  "
+                f"RSI{rsi:.0f}  YoY{yoy_str}  PER{per_str}  外資20日{f20_str}"
             )
         messages.append("\n".join(rev_lines))
 

@@ -104,8 +104,12 @@ def signal_longterm_quality_entry(df: pd.DataFrame,
                  if "foreign_" in df.columns else pd.Series(0.0, index=df.index))
         t_60d = (df["trust"].rolling(60, min_periods=30).sum()
                  if "trust" in df.columns else pd.Series(0.0, index=df.index))
+        df["f_60d"] = f_60d
+        df["t_60d"] = t_60d
         cond_inst_accum = (f_60d + t_60d) > 0
     else:
+        df["f_60d"] = 0.0
+        df["t_60d"] = 0.0
         cond_inst_accum = pd.Series(True, index=df.index)
 
     # PER 過濾：0 < PER < 20（有獲利且不過貴）；無資料時放行
@@ -116,6 +120,8 @@ def signal_longterm_quality_entry(df: pd.DataFrame,
         cond_per = pd.Series(True, index=df.index)
 
     df["signal_long"] = (cond_above_ma60 & cond_macd & cond_bb & cond_rsi & cond_inst_accum & cond_per)
+    if "_per" in df.columns:
+        df.rename(columns={"_per": "per"}, inplace=True)
     return _apply_market_filter(df, "signal_long", market_filter)
 
 
@@ -277,9 +283,15 @@ def signal_revenue_momentum(
 
         if tech_ok and inst_ok and per_ok:
             df.loc[day_mask, "signal_rev"] = True
+            # 把當月 revenue_yoy 寫入 signal 行，供通知格式化使用
+            rev_row = rev[rev["publish_date"] == pub_ts]
+            if not rev_row.empty:
+                df.loc[day_mask, "revenue_yoy"] = float(rev_row.iloc[-1]["yoy"])
 
-    df.drop(columns=["_foreign_20d", "_inst_threshold", "_vol_20d_avg",
-                      "_ret_5d", "_per"], errors="ignore", inplace=True)
+    # 保留供通知顯示的欄位，內部輔助欄清除
+    df.rename(columns={"_foreign_20d": "f_20d", "_per": "per"}, inplace=True)
+    df.drop(columns=["_inst_threshold", "_vol_20d_avg", "_ret_5d"],
+            errors="ignore", inplace=True)
     return _apply_market_filter(df, "signal_rev", market_filter)
 
 
