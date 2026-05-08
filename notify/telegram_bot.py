@@ -13,9 +13,10 @@ from data.cache import load_universe
 load_dotenv(override=True)
 logger = logging.getLogger(__name__)
 
-TOKEN   = os.getenv("TELEGRAM_TOKEN", "").strip()
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
-API_URL = f"https://api.telegram.org/bot{TOKEN}"
+TOKEN    = os.getenv("TELEGRAM_TOKEN", "").strip()
+API_URL  = f"https://api.telegram.org/bot{TOKEN}"
+# 支援多個接收者：逗號分隔，例如 "123456,-100987654321"
+CHAT_IDS = [c.strip() for c in os.getenv("TELEGRAM_CHAT_ID", "").split(",") if c.strip()]
 
 MARKET_EMOJI = {"TWSE": "🔵", "TPEx": "🟢", "Emerging": "🟡"}
 TF_LABEL = {
@@ -26,20 +27,22 @@ TF_LABEL = {
 
 
 def send_message(text: str) -> bool:
-    if not TOKEN or not CHAT_ID:
+    if not TOKEN or not CHAT_IDS:
         logger.warning("Telegram not configured (TOKEN or CHAT_ID missing)")
         return False
-    try:
-        r = requests.post(
-            f"{API_URL}/sendMessage",
-            json={"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"},
-            timeout=10,
-        )
-        r.raise_for_status()
-        return True
-    except Exception as e:
-        logger.error(f"Telegram send failed: {e}")
-        return False
+    ok = True
+    for chat_id in CHAT_IDS:
+        try:
+            r = requests.post(
+                f"{API_URL}/sendMessage",
+                json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
+                timeout=10,
+            )
+            r.raise_for_status()
+        except Exception as e:
+            logger.error(f"Telegram send failed (chat_id={chat_id}): {e}")
+            ok = False
+    return ok
 
 
 MAX_POSITIONS      = 10   # 最多同時持有 10 檔
