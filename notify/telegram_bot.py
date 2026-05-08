@@ -157,7 +157,7 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
             name = names.get(sid, "")
             lines.append(
                 f"{emoji} <b>{sid} {name}</b>  ${close}  "
-                f"BB{bb_str}  KD{kd:.0f}  RSI{rsi:.0f}  PER{per_str}  法人60日{inst_str}"
+                f"BB{bb_str}  KD{kd:.0f}  RSI{rsi:.0f}  本益比{per_str}  法人60日{inst_str}"
             )
         messages.append("\n".join(lines))
         _append_signal_log(long_df, date)
@@ -184,7 +184,7 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
             name = names.get(sid, "")
             rev_lines.append(
                 f"{emoji} <b>{sid} {name}</b>  ${close}  "
-                f"RSI{rsi:.0f}  YoY{yoy_str}  PER{per_str}  外資20日{f20_str}"
+                f"RSI{rsi:.0f}  YoY{yoy_str}  本益比{per_str}  外資20日{f20_str}"
             )
         messages.append("\n".join(rev_lines))
 
