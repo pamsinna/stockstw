@@ -44,9 +44,13 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p data
-          gh release download --pattern "cache.db" --dir data/ --clobber \
-            && echo "DB downloaded from release" \
-            || echo "No release found, starting with empty DB"
+          if gh release download --pattern "cache.db.gz" --dir data/ --clobber 2>/dev/null; then
+            gzip -d data/cache.db.gz && echo "DB downloaded and decompressed from release"
+          elif gh release download --pattern "cache.db" --dir data/ --clobber 2>/dev/null; then
+            echo "DB downloaded from release (uncompressed)"
+          else
+            echo "No release found, starting with empty DB"
+          fi
 
       - name: Create reports dir
         run: mkdir -p reports
