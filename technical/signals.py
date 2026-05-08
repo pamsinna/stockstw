@@ -115,11 +115,8 @@ def signal_longterm_quality_entry(df: pd.DataFrame,
     # PER 過濾：0 < PER < 20（有獲利且不過貴）；無資料時放行
     if per_df is not None and not per_df.empty:
         df = _merge_per(df, per_df)
-        cond_per = (df["_per"] > 0) & (df["_per"] < 20) | df["_per"].isna()
-    else:
-        cond_per = pd.Series(True, index=df.index)
 
-    df["signal_long"] = (cond_above_ma60 & cond_macd & cond_bb & cond_rsi & cond_inst_accum & cond_per)
+    df["signal_long"] = (cond_above_ma60 & cond_macd & cond_bb & cond_rsi & cond_inst_accum)
     if "_per" in df.columns:
         df.rename(columns={"_per": "per"}, inplace=True)
     return _apply_market_filter(df, "signal_long", market_filter)
@@ -281,10 +278,7 @@ def signal_revenue_momentum(
             (df.loc[day_mask, "_foreign_20d"] >=
              df.loc[day_mask, "_inst_threshold"]).any()
         )
-        per_val = df.loc[day_mask, "_per"].iloc[0] if day_mask.any() else float("nan")
-        per_ok  = pd.isna(per_val) or (0 < per_val < 20)
-
-        if tech_ok and inst_ok and per_ok:
+        if tech_ok and inst_ok:
             df.loc[day_mask, "signal_rev"] = True
             # 把當月 revenue_yoy 寫入 signal 行，供通知格式化使用
             rev_row = rev[rev["publish_date"] == pub_ts]
