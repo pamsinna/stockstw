@@ -367,6 +367,7 @@ STRATEGIES = [
         "default_tp": 0.30, "default_sl": 0.10, "default_hold": 90,
         "strict_market": True,
         "needs_per": True,
+        "needs_fundamental": True,
     },
     {
         "name": "月營收動能",
@@ -376,5 +377,6 @@ STRATEGIES = [
         "default_tp": 0.40, "default_sl": 0.12, "default_hold": 120,
         "needs_revenue": True,
         "needs_per": True,
+        "needs_fundamental": True,
     },
 ]

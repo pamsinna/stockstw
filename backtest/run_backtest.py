@@ -16,6 +16,7 @@ from data.cache import (
     load_monthly_revenue, last_revenue_date, mark_fetch_skip,
     save_per, last_per_date, load_per, save_financial,
 )
+from fundamental.quality_filter import batch_fundamentals
 from data.universe import build_universe
 from data.fetcher import (fetch_price, fetch_institutional, fetch_monthly_revenue,
                           fetch_per, fetch_financial_statement, fetch_balance_sheet,
@@ -176,6 +177,13 @@ def download_financial(universe: pd.DataFrame,
     if max_stocks:
         stocks = stocks[:max_stocks]
 
+    from data.cache import _conn as _cache_conn
+    with _cache_conn() as _c:
+        already_logged = set(
+            (r[0], r[1]) for r in
+            _c.execute("SELECT stock_id, dataset FROM fetch_log WHERE dataset LIKE 'fin_%'").fetchall()
+        )
+
     logger.info(f"Downloading financial statements for {len(stocks)} stocks (3 datasets each)...")
     for sid in tqdm(stocks, desc="Financial"):
         for fetch_fn, label in [
@@ -183,15 +191,22 @@ def download_financial(universe: pd.DataFrame,
             (fetch_balance_sheet,       "bs"),
             (fetch_cash_flow,           "cf"),
         ]:
+            dataset_key = f"fin_{label}"
+            if (sid, dataset_key) in already_logged:
+                continue
             df = fetch_fn(sid, start)
             if df is None:
-                mark_fetch_skip(sid, f"fin_{label}")
+                mark_fetch_skip(sid, dataset_key)
             elif not df.empty:
                 df = df.copy()
                 df["stock_id"] = sid
                 if "date" in df.columns:
                     df["date"] = df["date"].astype(str)
                 save_financial(sid, df)
+                mark_fetch_skip(sid, dataset_key)  # 記錄已下載，下次 skip
+            else:
+                # 空回應：不寫 fetch_log，下次重試
+                pass
 
     logger.info("Financial download complete")
 
@@ -238,6 +253,11 @@ def run_all_strategies(universe: pd.DataFrame,
 
     market_map = dict(zip(universe["stock_id"], universe["market"]))
 
+    # 基本面篩選（注意：使用最新財報，非歷史快照，有輕微前視偏差）
+    fund_df = batch_fundamentals(stocks)
+    fund_ok = set(fund_df[fund_df["passes_filter"]]["stock_id"])
+    logger.info(f"Fundamental filter: {len(fund_ok)}/{len(stocks)} stocks pass")
+
     # 大盤過濾：寬鬆版（策略一～三、五），嚴格版（策略四專用）
     market_filter = build_market_filter(start, end)
     strict_market_filter = build_market_filter(start, end, strict=True)
@@ -263,10 +283,13 @@ def run_all_strategies(universe: pd.DataFrame,
 
         needs_rev   = strategy.get("needs_revenue", False)
         needs_per   = strategy.get("needs_per", False)
+        needs_fund  = strategy.get("needs_fundamental", False)
         use_strict  = strategy.get("strict_market", False)
         active_mf   = strict_market_filter if use_strict else market_filter
 
         for sid in tqdm(stocks, desc=name, leave=False):
+            if needs_fund and sid not in fund_ok:
+                continue
             price = load_prices(sid, start=DATA_START, end=end)
             if len(price) < 60:  # 資料太少跳過
                 continue
