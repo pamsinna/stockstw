@@ -25,16 +25,19 @@ _session = requests.Session()
 _session.headers.update({"User-Agent": "Mozilla/5.0 (research bot)"})
 
 
-_PERM_SKIP = object()  # sentinel: 402/403 — permanent skip, no retry, no sleep
+_PERM_SKIP = object()  # sentinel: 403 — permanent skip, no retry, no sleep
 
 
 def _get(url: str, params: dict, retries: int = 3, delay: float = 1.0):
     for i in range(retries):
         try:
             r = _session.get(url, params=params, timeout=15)
-            # 402/403 = 付費限制或已下市，永久跳過（不重試、不睡覺）
-            if r.status_code in (402, 403):
+            # 403 = 已下市或無權限，永久跳過
+            if r.status_code == 403:
                 return _PERM_SKIP
+            # 402 = 可能是暫時限流，回傳空讓下次重試（不寫 9999）
+            if r.status_code == 402:
+                return None
             # 429 = rate limit，等久一點再試
             if r.status_code == 429:
                 time.sleep(60)
@@ -112,7 +115,7 @@ def fetch_tpex_stock_list() -> pd.DataFrame:
 def _finmind(dataset: str, stock_id: str, start: str, end: str = "") -> pd.DataFrame | None:
     """
     回傳 DataFrame（有或沒有資料）或 None。
-    None = 402/403 永久跳過，呼叫方應寫入 fetch_log 避免下次重試。
+    None = 403 永久跳過，呼叫方應寫入 fetch_log 避免下次重試。
     """
     params = {
         "dataset": dataset,
@@ -125,7 +128,7 @@ def _finmind(dataset: str, stock_id: str, start: str, end: str = "") -> pd.DataF
     data = _get(FINMIND_URL, params)
     time.sleep(_RATE_LIMIT_SEC)  # 402/403 也要睡：請求已打出去，需遵守 rate limit
     if data is _PERM_SKIP:
-        logger.debug(f"FinMind {dataset} {stock_id}: 402/403 permanent skip")
+        logger.debug(f"FinMind {dataset} {stock_id}: 403 permanent skip")
         return None
     if not data or data.get("status") != 200:
         logger.warning(f"FinMind {dataset} {stock_id}: {data.get('msg') if data else 'no response'}")
