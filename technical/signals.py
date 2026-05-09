@@ -95,7 +95,7 @@ def signal_longterm_quality_entry(df: pd.DataFrame,
     # MACD 翻正
     cond_macd = df["macd_golden"] & df["macd_positive"]
     # 布林帶位置適中（不追高，在中軸以上）
-    cond_bb = (df["bb_pct"] > 0.3) & (df["bb_pct"] < 0.85)
+    cond_bb = (df["bb_pct"] > 0.3) & (df["bb_pct"] < 1.2)
     # RSI 未過熱
     cond_rsi = df["rsi"] < 70
     # 法人 60 日累計淨買超：外資 + 投信合計 > 0（OR 改為加總，避免一買一大賣仍過關）
