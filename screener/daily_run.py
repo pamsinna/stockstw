@@ -184,6 +184,11 @@ def _summary_row(stock_id: str, market: str,
         "rsi":       round(float(last.get("rsi", 0)), 1),
         "ma_aligned":bool(last.get("ma_aligned", False)),
         "inst_total":float(last.get("inst_total", 0)),
+        "per":         float(last.get("per", float("nan"))),
+        "f_60d":       float(last.get("f_60d", 0.0)),
+        "t_60d":       float(last.get("t_60d", 0.0)),
+        "f_20d":       float(last.get("f_20d", float("nan"))),
+        "revenue_yoy": float(last.get("revenue_yoy", float("nan"))),
     }
 
 
