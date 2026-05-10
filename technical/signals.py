@@ -92,8 +92,8 @@ def signal_longterm_quality_entry(df: pd.DataFrame,
 
     # 月線以上（趨勢向上）
     cond_above_ma60 = df["close"] > df["ma60"]
-    # MACD 翻正
-    cond_macd = df["macd_golden"] & df["macd_positive"]
+    # MACD 金叉（5 日視窗：允許金叉後幾天才突破月線；不要求 MACD > 0）
+    cond_macd = df["macd_golden"].rolling(5, min_periods=1).max().astype(bool)
     # 布林帶位置適中（不追高，在中軸以上）
     cond_bb = (df["bb_pct"] > 0.3) & (df["bb_pct"] < 1.2)
     # RSI 未過熱
