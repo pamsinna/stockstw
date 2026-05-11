@@ -77,9 +77,12 @@ def signal_swing_ma_kd_inst(df: pd.DataFrame,
 # 核心邏輯：均線多頭 + MACD 金叉翻正 + 布林下軌反彈（逢低進場）
 
 def _merge_per(df: pd.DataFrame, per_df: pd.DataFrame) -> pd.DataFrame:
-    """把每日 PER 合併進價格 DataFrame（left join on date）。"""
+    """把每日 PER 合併進價格 DataFrame（left join on date）。
+    ffill 補齊最新價格日期沒有對應 PER 的情況（PER 更新頻率低於日 K）。"""
     per = per_df[["date", "per"]].rename(columns={"per": "_per"})
-    return df.merge(per, on="date", how="left")
+    merged = df.merge(per, on="date", how="left")
+    merged["_per"] = merged["_per"].ffill()
+    return merged
 
 
 def signal_longterm_quality_entry(df: pd.DataFrame,
@@ -92,8 +95,8 @@ def signal_longterm_quality_entry(df: pd.DataFrame,
 
     # 月線以上（趨勢向上）
     cond_above_ma60 = df["close"] > df["ma60"]
-    # MACD 金叉（5 日視窗：允許金叉後幾天才突破月線；不要求 MACD > 0）
-    cond_macd = df["macd_golden"].rolling(5, min_periods=1).max().astype(bool)
+    # MACD 金叉（3 日視窗：允許金叉後幾天才突破月線；不要求 MACD > 0）
+    cond_macd = df["macd_golden"].rolling(3, min_periods=1).max().astype(bool)
     # 布林帶位置適中（不追高，在中軸以上）
     cond_bb = (df["bb_pct"] > 0.3) & (df["bb_pct"] < 1.2)
     # RSI 未過熱
