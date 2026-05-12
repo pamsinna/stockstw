@@ -37,7 +37,7 @@ def incremental_update(universe: pd.DataFrame) -> None:
     只更新 DB 中已有歷史資料的股票 + 0050（大盤代理）
     新股第一次下載需執行 download 模式
     """
-    yesterday = (datetime.now(_TZ) - timedelta(days=1)).strftime("%Y-%m-%d")
+    today_str = datetime.now(_TZ).strftime("%Y-%m-%d")
 
     all_stocks = universe["stock_id"].tolist()
     stocks_to_update = [
@@ -51,7 +51,7 @@ def incremental_update(universe: pd.DataFrame) -> None:
 
     for sid in tqdm(stocks_to_update, desc="Update"):
         last = last_price_date(sid) or DATA_START
-        if last >= yesterday:
+        if last >= today_str:
             continue
 
         price = fetch_price(sid, last)  # rate-limited inside _finmind()
