@@ -5,7 +5,7 @@
 3. 分三個時間框架輸出當日訊號清單，並套用大盤過濾
 """
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import pandas as pd
