@@ -184,6 +184,15 @@ def save_institutional(stock_id: str, df: pd.DataFrame) -> None:
         )
 
 
+def last_institutional_date(stock_id: str) -> str | None:
+    with _conn() as con:
+        row = con.execute(
+            "SELECT last_date FROM fetch_log WHERE stock_id=? AND dataset='institutional'",
+            (stock_id,)
+        ).fetchone()
+    return row[0] if row else None
+
+
 def load_institutional(stock_id: str, start: str = "2018-01-01") -> pd.DataFrame:
     with _conn() as con:
         df = pd.read_sql(

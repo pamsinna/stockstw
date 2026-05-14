@@ -14,8 +14,8 @@ from tqdm import tqdm
 from config import DATA_START
 from data.cache import (
     init_db, load_prices, load_institutional, load_monthly_revenue, load_per,
-    save_prices, save_institutional, last_price_date, last_revenue_date,
-    mark_fetch_skip,
+    save_prices, save_institutional, last_price_date, last_institutional_date,
+    last_revenue_date, mark_fetch_skip,
 )
 from data.universe import build_universe
 from data.fetcher import fetch_price, fetch_institutional, fetch_monthly_revenue
@@ -62,11 +62,13 @@ def incremental_update(universe: pd.DataFrame) -> None:
         if not price.empty:
             save_prices(sid, price)
 
-        inst = fetch_institutional(sid, last)  # rate-limited inside _finmind()
-        if inst is None:
-            mark_fetch_skip(sid, "institutional")
-        elif not inst.empty:
-            save_institutional(sid, inst)
+        last_inst = last_institutional_date(sid) or DATA_START
+        if last_inst < today_str:
+            inst = fetch_institutional(sid, last_inst)  # rate-limited inside _finmind()
+            if inst is None:
+                mark_fetch_skip(sid, "institutional")
+            elif not inst.empty:
+                save_institutional(sid, inst)
 
     # 月營收：每月 1～10 號才抓（法規要求 10 號前公布，提早抓以第一時間收到）
     today = datetime.now(_TZ)
@@ -130,14 +132,23 @@ def screen_today(universe: pd.DataFrame,
     mf = market_filter
     strict_mf = strict_market_filter
 
+    # 用 0050 最後資料日當「本日交易日」基準：只對資料已更新至此日的股票產生訊號
+    taiex_price = load_prices(TAIEX_PROXY, start="2024-01-01")
+    last_trading_day = taiex_price["date"].max() if not taiex_price.empty else pd.Timestamp("2000-01-01")
+    logger.info(f"Latest trading day (0050): {last_trading_day.date()}")
+
     stale_cutoff = pd.Timestamp(datetime.now(_TZ).date()) - pd.Timedelta(days=15)  # ~10 交易日
 
     for sid in tqdm(universe["stock_id"], desc="Screen"):
         price = load_prices(sid, start="2020-01-01")
         if len(price) < 60:
             continue
-        # 過濾下市或長期停牌（最後交易日超過 15 天視為非活躍）
-        if price["date"].max() < stale_cutoff:
+        last_date = price["date"].max()
+        # 下市或長期停牌
+        if last_date < stale_cutoff:
+            continue
+        # 資料未更新至最後交易日：跳過，避免用舊資料產生訊號
+        if last_date < last_trading_day:
             continue
         inst = load_institutional(sid, start="2020-01-01")
         inst_arg = inst if not inst.empty else None
