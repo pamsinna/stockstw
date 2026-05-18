@@ -24,12 +24,16 @@ from fundamental.quality_filter import batch_fundamentals
 from technical.signals import (
     signal_longterm_quality_entry,
     signal_revenue_momentum,
+    STRATEGIES,
 )
 
 logger = logging.getLogger(__name__)
 
 _TZ = ZoneInfo("Asia/Taipei")
 TAIEX_PROXY = "0050"
+
+_S4 = next(s for s in STRATEGIES if s["name"] == "中長線_品質股低接")
+_S4_INST_THR = _S4.get("inst_threshold", 0)
 
 
 def incremental_update(universe: pd.DataFrame) -> None:
@@ -159,7 +163,7 @@ def screen_today(universe: pd.DataFrame,
 
         try:
             if sid in fund_ok:
-                df_l = signal_longterm_quality_entry(price, inst_arg, per_df=per_arg, market_filter=strict_mf)
+                df_l = signal_longterm_quality_entry(price, inst_arg, per_df=per_arg, market_filter=strict_mf, inst_threshold=_S4_INST_THR)
                 if bool(df_l.iloc[-1]["signal_long"]):
                     results["long"].append(_summary_row(sid, market, df_l, "long"))
 

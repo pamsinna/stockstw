@@ -88,7 +88,8 @@ def _merge_per(df: pd.DataFrame, per_df: pd.DataFrame) -> pd.DataFrame:
 def signal_longterm_quality_entry(df: pd.DataFrame,
                                    inst_df: pd.DataFrame | None = None,
                                    per_df: pd.DataFrame | None = None,
-                                   market_filter: pd.Series | None = None) -> pd.DataFrame:
+                                   market_filter: pd.Series | None = None,
+                                   inst_threshold: int = 0) -> pd.DataFrame:
     df = add_all(df)
     if inst_df is not None and not inst_df.empty:
         df = merge_institutional(df, inst_df)
@@ -109,7 +110,7 @@ def signal_longterm_quality_entry(df: pd.DataFrame,
                  if "trust" in df.columns else pd.Series(0.0, index=df.index))
         df["f_60d"] = f_60d
         df["t_60d"] = t_60d
-        cond_inst_accum = (f_60d + t_60d) > 0
+        cond_inst_accum = (f_60d + t_60d) > inst_threshold
     else:
         df["f_60d"] = 0.0
         df["t_60d"] = 0.0
@@ -386,6 +387,7 @@ STRATEGIES = [
         "strict_market": True,
         "needs_per": True,
         "needs_fundamental": True,
+        "inst_threshold": 5_000_000,
     },
     {
         "name": "月營收動能",

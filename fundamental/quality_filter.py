@@ -181,6 +181,8 @@ def _passes(r: dict) -> bool:
         return False
     if _ok(r["ocf_ratio"]) and r["ocf_ratio"] < 0:
         return False
+    if _ok(r["roe"]) and r["roe"] < F["min_roe"]:
+        return False
     return True
 
 

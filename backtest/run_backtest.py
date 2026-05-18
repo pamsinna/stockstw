@@ -301,6 +301,8 @@ def run_all_strategies(universe: pd.DataFrame,
             if needs_per:
                 per = load_per(sid, start=DATA_START, end=end)
                 extra["per_df"] = per if not per.empty else None
+            if "inst_threshold" in strategy:
+                extra["inst_threshold"] = strategy["inst_threshold"]
             try:
                 df = signal_fn(
                     price,
