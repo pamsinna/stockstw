@@ -387,7 +387,7 @@ STRATEGIES = [
         "strict_market": True,
         "needs_per": True,
         "needs_fundamental": True,
-        "inst_threshold": 5_000_000,
+        "inst_threshold": 1_000_000,
     },
     {
         "name": "月營收動能",
