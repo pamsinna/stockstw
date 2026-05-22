@@ -120,4 +120,5 @@ def print_report(name: str, metrics: dict, phase: str = "") -> None:
     reasons = metrics.get("exit_reasons", {})
     print(f"  出場原因：    停利={reasons.get('take_profit',0)}, "
           f"停損={reasons.get('stop_loss',0)}, "
+          f"移動停利={reasons.get('trailing_stop',0)}, "
           f"到期={reasons.get('max_hold',0)}")

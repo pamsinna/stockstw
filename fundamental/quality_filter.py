@@ -65,9 +65,13 @@ def calc_fundamentals(stock_id: str) -> dict:
 
 
 def _calc_eps_roe(fin: pd.DataFrame) -> dict:
-    """近四季 EPS 合計（TTM）和最新 ROE"""
+    """近四季 EPS 合計（TTM）和 ROE（TTM NetIncome / 最新 Equity）。
+    FinMind 沒有直接提供 ROE，需要自己算。
+    Net income 型別名稱會隨會計年度改變：IncomeAfterTaxes（2020+）為主，
+    IncomeAfterTax / NetIncome 為舊版 fallback。"""
     eps_df = fin[fin["type"] == "EPS"].copy()
-    roe_df = fin[fin["type"] == "ROE"].copy()
+    ni_df  = fin[fin["type"].isin(["IncomeAfterTaxes", "IncomeAfterTax", "NetIncome"])].copy()
+    eq_df  = fin[fin["type"] == "Equity"].copy()
 
     eps_ttm = np.nan
     if not eps_df.empty:
@@ -76,9 +80,15 @@ def _calc_eps_roe(fin: pd.DataFrame) -> dict:
         recent = eps_df.tail(4)
         eps_ttm = recent["value"].sum()
 
+    # ROE % = TTM NetIncome / 最新 Equity × 100
     roe = np.nan
-    if not roe_df.empty:
-        roe = roe_df.sort_values("date").iloc[-1]["value"]
+    if not ni_df.empty and not eq_df.empty:
+        ni_df = ni_df.sort_values("date")
+        ni_ttm = ni_df.tail(4)["value"].sum()
+        eq_df = eq_df.sort_values("date")
+        latest_eq = eq_df.iloc[-1]["value"]
+        if latest_eq > 0:
+            roe = (ni_ttm / latest_eq) * 100
 
     return {"eps_ttm": eps_ttm, "roe": roe}
 
@@ -181,7 +191,11 @@ def _passes(r: dict) -> bool:
         return False
     if _ok(r["ocf_ratio"]) and r["ocf_ratio"] < 0:
         return False
-    if _ok(r["roe"]) and r["roe"] < F["min_roe"]:
+    # ROE 硬性：必須有資料且達門檻（不再讓 NaN 放行）
+    if not _ok(r["roe"]) or r["roe"] < F["min_roe"]:
+        return False
+    # EPS YoY 連續成長至少 2 季（避開單季亮點、確認趨勢）
+    if r.get("eps_growth_q", 0) < 2:
         return False
     return True
 
