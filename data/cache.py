@@ -131,7 +131,7 @@ def save_prices(stock_id: str, df: pd.DataFrame) -> None:
         return
     df = df.copy()
     df["stock_id"] = stock_id
-    df["date"] = df["date"].astype(str)
+    df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
     with _conn() as con:
         df.to_sql("daily_price", con, if_exists="append", index=False,
                   method=_insert_or_ignore)
@@ -171,7 +171,7 @@ def save_institutional(stock_id: str, df: pd.DataFrame) -> None:
         return
     df = df.copy()
     df["stock_id"] = stock_id
-    df["date"] = df["date"].astype(str)
+    df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
     # 欄位名稱對應 DB schema (foreign_ 避免關鍵字衝突)
     if "foreign" in df.columns:
         df = df.rename(columns={"foreign": "foreign_"})
@@ -211,7 +211,7 @@ def save_financial(stock_id: str, df: pd.DataFrame) -> None:
         return
     df = df.copy()
     df["stock_id"] = stock_id
-    df["date"] = df["date"].astype(str)
+    df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
     with _conn() as con:
         df[["stock_id", "date", "type", "value"]].to_sql(
             "financial", con, if_exists="append", index=False, method=_insert_or_ignore
@@ -240,7 +240,7 @@ def save_monthly_revenue(stock_id: str, df: pd.DataFrame) -> None:
         return
     df = df.copy()
     df["stock_id"] = stock_id
-    df["date"] = df["date"].astype(str)
+    df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
     # record today as the first-fetch date (INSERT OR IGNORE keeps original)
     df["fetched_date"] = str(_date.today())
     needed = ["stock_id", "date", "revenue", "revenue_yoy", "fetched_date"]
@@ -254,9 +254,16 @@ def save_monthly_revenue(stock_id: str, df: pd.DataFrame) -> None:
         )
 
 
+_PROTECTED_STOCKS = {"0050"}  # 大盤代理：永遠不可標記為永久跳過
+
+
 def mark_fetch_skip(stock_id: str, dataset: str) -> None:
     """記錄此股票／資料集為永久跳過（402/403）。
-    fetch_log 日期設 9999-12-31，下次 last_X_date() 回傳值 >= 任何昨天，不再重試。"""
+    fetch_log 日期設 9999-12-31，下次 last_X_date() 回傳值 >= 任何昨天，不再重試。
+    0050 是市場過濾與 staleness guard 的錨點，永遠不可標記為跳過。"""
+    if stock_id in _PROTECTED_STOCKS:
+        logger.warning(f"Refusing to mark_fetch_skip protected stock {stock_id}/{dataset}")
+        return
     with _conn() as con:
         con.execute(
             "INSERT OR REPLACE INTO fetch_log VALUES (?,?,?)",
@@ -291,7 +298,7 @@ def save_per(stock_id: str, df: pd.DataFrame) -> None:
         return
     df = df.copy()
     df["stock_id"] = stock_id
-    df["date"] = df["date"].astype(str)
+    df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
     with _conn() as con:
         df.to_sql("daily_per", con, if_exists="append", index=False,
                   method=_insert_or_ignore)

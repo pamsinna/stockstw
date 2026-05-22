@@ -61,11 +61,10 @@ def incremental_update(universe: pd.DataFrame) -> None:
         price = fetch_price(sid, last)  # rate-limited inside _finmind()
         if price is None:
             mark_fetch_skip(sid, "price")
-            mark_fetch_skip(sid, "institutional")
-            continue
-        if not price.empty:
+        elif not price.empty:
             save_prices(sid, price)
 
+        # 法人獨立判斷：價格 403 不代表法人歷史資料不能補
         last_inst = last_institutional_date(sid) or DATA_START
         if last_inst < today_str:
             inst = fetch_institutional(sid, last_inst)  # rate-limited inside _finmind()
@@ -142,6 +141,7 @@ def screen_today(universe: pd.DataFrame,
     logger.info(f"Latest trading day (0050): {last_trading_day.date()}")
 
     stale_cutoff = pd.Timestamp(datetime.now(_TZ).date()) - pd.Timedelta(days=15)  # ~10 交易日
+    signal_errors: dict[str, int] = {}  # exception class → count
 
     for sid in tqdm(universe["stock_id"], desc="Screen"):
         price = load_prices(sid, start="2020-01-01")
@@ -175,7 +175,14 @@ def screen_today(universe: pd.DataFrame,
                 results["revenue"].append(_summary_row(sid, market, df_rv, "revenue"))
 
         except Exception as e:
-            logger.debug(f"{sid}: {e}")
+            cls = type(e).__name__
+            signal_errors[cls] = signal_errors.get(cls, 0) + 1
+            logger.debug(f"{sid}: {cls}: {e}")
+
+    if signal_errors:
+        total = sum(signal_errors.values())
+        breakdown = ", ".join(f"{cls}={n}" for cls, n in sorted(signal_errors.items()))
+        logger.warning(f"Signal computation failed for {total} stocks ({breakdown})")
 
     return {
         k: pd.DataFrame(v).sort_values("vol_ratio", ascending=False)
