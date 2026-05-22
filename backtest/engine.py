@@ -82,11 +82,18 @@ def run_backtest(
     stock_id: str = "",
     market: str = "TWSE",
     consec_down_exit: bool = False,
+    trail_trigger: float | None = None,
+    trail_pct: float = 0.15,
 ) -> BacktestResult:
     """
     price_df 必須有欄位：date, open, high, low, close, <signal_col>
     signal_col: True/1 表示當天收盤後產生買進訊號，次日開盤進場
     consec_down_exit: True 時，持倉期間連續兩日收低則次日開盤出場
+
+    trail_trigger / trail_pct: 啟用 trailing stop。當持倉峰值漲幅達
+    trail_trigger（如 0.20 = +20%），take_profit 失效，改為「峰值跌
+    trail_pct（如 0.15 = -15%）出場」。trail_trigger=None 時為原行為。
+    Peak 採用「結算自上一根 bar 後」的保守估計，避免 intraday look-ahead。
     """
     df = price_df.copy()
     df = df[(df["date"] >= pd.Timestamp(start)) &
@@ -106,6 +113,7 @@ def run_backtest(
     trade: Trade | None = None
     down_streak: int = 0
     prev_close_in_trade: float = 0.0
+    peak_price: float = 0.0  # 持倉期間最高價（trailing stop 用）
 
     for i in range(len(df) - 1):
         row   = df.iloc[i]
@@ -142,7 +150,19 @@ def run_backtest(
             exit_price = None
             reason = ""
 
-            if sl_hit and tp_hit:
+            if trail_trigger is not None:
+                # Trailing stop 模式：取代 take_profit
+                # peak_price 採「結算自上一根 bar 後」的值（不含當日 high）
+                trail_active = peak_price >= ep * (1 + trail_trigger)
+                if trail_active:
+                    trail_level = peak_price * (1 - trail_pct)
+                    if row["low"] <= trail_level:
+                        exit_price = trail_level
+                        reason = "trailing_stop"
+                if exit_price is None and sl_hit:
+                    exit_price = ep * (1 - stop_loss)
+                    reason = "stop_loss"
+            elif sl_hit and tp_hit:
                 # Both triggered intraday — daily OHLCV can't tell which fired
                 # first. Use the open as a tiebreaker: a gap-up open above TP
                 # almost certainly hit TP first; otherwise default to SL
@@ -177,7 +197,12 @@ def run_backtest(
                 trade = None
                 down_streak = 0
                 prev_close_in_trade = 0.0
+                peak_price = 0.0
                 continue
+
+            # 出場條件未觸發：更新 peak（含當日 high），供下一根 bar 使用
+            if row["high"] > peak_price:
+                peak_price = row["high"]
 
         # ── 無持倉：檢查進場訊號 ─────────────────────────────────────────
         if not in_trade and bool(row.get(signal_col, False)):
@@ -192,6 +217,7 @@ def run_backtest(
             in_trade = True
             down_streak = 0
             prev_close_in_trade = 0.0
+            peak_price = entry_px
 
     # 回測結束時強制平倉未了結部位
     if in_trade and trade is not None:
@@ -214,6 +240,8 @@ def run_portfolio_backtest(
     end: str,
     market_map: dict[str, str] | None = None,
     consec_down_exit: bool = False,
+    trail_trigger: float | None = None,
+    trail_pct: float = 0.15,
 ) -> BacktestResult:
     """多股票批次回測，整合所有交易到一個 BacktestResult"""
     combined = BacktestResult()
@@ -224,6 +252,8 @@ def run_portfolio_backtest(
             take_profit, stop_loss, max_hold_days,
             start, end, stock_id, market,
             consec_down_exit=consec_down_exit,
+            trail_trigger=trail_trigger,
+            trail_pct=trail_pct,
         )
         combined.trades.extend(r.trades)
     return combined

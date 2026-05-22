@@ -322,6 +322,8 @@ def run_all_strategies(universe: pd.DataFrame,
             price_map, signal_col, tp, sl, mh,
             start, end, market_map=market_map,
             consec_down_exit=strategy.get("consec_down_exit", False),
+            trail_trigger=strategy.get("trail_trigger"),
+            trail_pct=strategy.get("trail_pct", 0.15),
         )
         m = calc_metrics(result)
         print_report(name, m, phase=phase)
