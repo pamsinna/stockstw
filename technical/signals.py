@@ -169,6 +169,9 @@ def signal_revenue_momentum(
     rev_df: pd.DataFrame | None = None,
     per_df: pd.DataFrame | None = None,
     market_filter: pd.Series | None = None,
+    yoy_min: float = 15.0,
+    accel_min: float = 5.0,
+    consist_min: int = 6,
 ) -> pd.DataFrame:
     """
     策略五：月營收 YoY 加速 + 外資確認（基本面轉折因子）
@@ -177,10 +180,10 @@ def signal_revenue_momentum(
     11 日而非 10 日：部分公司在 10 日傍晚才公布，11 日確保全市場資料可用。
 
     進場條件（全部滿足）：
-      基本面：
-        1. YoY > 20%
-        2. 加速 > 10pp（vs 前 3 個月平均）
-        3. 過去 12 個月 ≥ 8 個月正成長
+      基本面（門檻可調，預設經 OOS 掃描優化）：
+        1. YoY > yoy_min (預設 15%)
+        2. 加速 > accel_min pp (預設 5pp)
+        3. 過去 12 個月 ≥ consist_min 個月正成長 (預設 6)
         4. 2 年 CAGR > 5%（消除基期效應，排除「去年太爛所以今年高 YoY」）
       籌碼：
         5. 近 20 日外資累計買超 > 近 20 日均量的 0.5%（相對強度，避免大型股雜訊）
@@ -236,9 +239,9 @@ def signal_revenue_momentum(
     # ── 所有四條基本面條件通過的公布日 ───────────────────────────────────────
     cagr_ok = rev["cagr_2y"].isna() | (rev["cagr_2y"] > 0.05)
     rev_ok = rev[
-        (rev["yoy"] > 20) &
-        (rev["yoy_accel"] > 10) &
-        (rev["consistency"] >= 8) &
+        (rev["yoy"] > yoy_min) &
+        (rev["yoy_accel"] > accel_min) &
+        (rev["consistency"] >= consist_min) &
         cagr_ok
     ]["publish_date"].tolist()
 
