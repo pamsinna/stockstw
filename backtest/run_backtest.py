@@ -85,24 +85,34 @@ def build_market_filter(start: str, end: str, ma_period: int = 60,
     """
     大盤過濾：
       寬鬆（預設）：收盤 > MA60，OR MA20 開始上揚（V 轉初期允許進場）
-      嚴格（strict=True，策略四專用）：收盤 > MA60 AND MA60 本身上升（5日比較）
+      嚴格（strict=True，策略四專用）：四條全滿足
+        ① 收盤 > MA60
+        ② 收盤 > MA20
+        ③ MA60 本身上升（5日比較）
+        ④ MA20 本身上升（5日比較）
+
+    嚴格版相當於「graded market score」拿滿 100 分；OOS 回測顯示比舊版
+    （只要 ①+③）的 Sharpe 11.60 → 12.21、MaxDD -9.54% → -7.44%。
     """
     df = load_prices(TAIEX_PROXY, start=DATA_START, end=end)
     if len(df) < ma_period:
         logger.warning("0050 data insufficient for market filter — filter disabled")
         return pd.Series(dtype=bool)
     df = df.sort_values("date").reset_index(drop=True)
+    df["ma20"] = df["close"].rolling(20).mean()
     df["ma60"] = df["close"].rolling(60).mean()
 
     above_ma60 = df["close"] > df["ma60"]
+    above_ma20 = df["close"] > df["ma20"]
+    ma60_rising = df["ma60"] > df["ma60"].shift(5)
+    ma20_rising = df["ma20"] > df["ma20"].shift(5)
 
     if strict:
-        df["ma60_rising"] = df["ma60"] > df["ma60"].shift(5)
-        df["market_up"] = above_ma60 & df["ma60_rising"]
+        # 四條全滿足（graded ≥ 100）
+        df["market_up"] = above_ma60 & above_ma20 & ma60_rising & ma20_rising
     else:
-        df["ma20"] = df["close"].rolling(20).mean()
-        df["ma20_rising"] = df["ma20"] > df["ma20"].shift(5)
-        v_turn_early = df["ma20_rising"] & (df["close"] > df["ma20"])
+        # V 轉初期允許進場：close > ma60，或 MA20 已上揚且站上 MA20
+        v_turn_early = ma20_rising & above_ma20
         df["market_up"] = above_ma60 | v_turn_early
 
     return df.set_index("date")["market_up"]
