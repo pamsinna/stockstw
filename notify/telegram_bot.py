@@ -101,6 +101,7 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
 
     long_df    = signals.get("long",    pd.DataFrame())
     revenue_df = signals.get("revenue", pd.DataFrame())
+    growth_df  = signals.get("growth",  pd.DataFrame())
 
     # 超過 10 支時按市值代理排序（收盤價 × 成交量 ≈ 當日成交金額）
     # vol_ratio 是策略一的條件，對策略四的 alpha 來源無關；
@@ -187,6 +188,37 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
                 f"RSI{rsi:.0f}  YoY{yoy_str}  本益比{per_str}  外資20日{f20_str}"
             )
         messages.append("\n".join(rev_lines))
+
+    # ── 策略六：高成長突破（regime-conditional，AI bull 時加強）─────────────
+    if not growth_df.empty:
+        # 按法人 60 日由大到小排
+        if "f_60d" in growth_df.columns and "t_60d" in growth_df.columns:
+            growth_df = growth_df.assign(
+                _inst60=growth_df["f_60d"].fillna(0) + growth_df["t_60d"].fillna(0)
+            ).sort_values("_inst60", ascending=False).drop(columns="_inst60")
+        g_lines = [
+            f"🚀 <b>策略六：高成長突破</b>  共 {len(growth_df)} 支",
+            "停利 +30%  停損 -10%  trailing +80%/-15%  最長 90 天",
+            "<i>⚠️ regime-conditional，勝率僅 ~38%（少數大贏家拉抬）</i>",
+            "<i>⚠️ 部位應比主力小（建議 S4 的 1/2 ~ 2/3）</i>\n",
+        ]
+        for _, row in growth_df.head(MAX_POSITIONS).iterrows():
+            emoji = MARKET_EMOJI.get(row.get("market", "TWSE"), "⚪")
+            sid   = row["stock_id"]
+            close = row.get("close", "—")
+            rsi   = row.get("rsi", 0)
+            f60   = row.get("f_60d", float("nan"))
+            t60   = row.get("t_60d", float("nan"))
+            vol_r = row.get("vol_ratio", float("nan"))
+            inst60 = (0 if pd.isna(f60) else f60) + (0 if pd.isna(t60) else t60)
+            inst_str = f"+{int(inst60//1000)}K" if inst60 > 0 else f"{int(inst60//1000)}K"
+            vol_s = f"{vol_r:.1f}x" if not pd.isna(vol_r) else "—"
+            name = names.get(sid, "")
+            g_lines.append(
+                f"{emoji} <b>{sid} {name}</b>  ${close}  "
+                f"RSI{rsi:.0f}  量{vol_s}  法人60日{inst_str}"
+            )
+        messages.append("\n".join(g_lines))
 
     # ── 執行紀律提醒 ──────────────────────────────────────────────────────
     messages.append(

@@ -24,6 +24,7 @@ from fundamental.quality_filter import batch_fundamentals
 from technical.signals import (
     signal_longterm_quality_entry,
     signal_revenue_momentum,
+    signal_growth_breakout,
     STRATEGIES,
 )
 
@@ -35,6 +36,10 @@ TAIEX_PROXY = "0050"
 _S4 = next(s for s in STRATEGIES if s["name"] == "中長線_品質股低接")
 _S4_INST_THR = _S4.get("inst_threshold", 0)
 _S4_RETAIL_MAX = _S4.get("retail_max_pct")
+
+_S6 = next(s for s in STRATEGIES if s["name"] == "高成長突破")
+_S6_INST_THR = _S6.get("inst_threshold", 0)
+_S6_REV_MIN = _S6.get("rev_growth_min", 10.0)
 
 
 def incremental_update(universe: pd.DataFrame) -> None:
@@ -106,7 +111,7 @@ def screen_today(universe: pd.DataFrame,
     回傳 {timeframe: DataFrame of signals today}
     timeframe: "short", "swing", "long"
     """
-    results: dict[str, list] = {"long": [], "revenue": []}
+    results: dict[str, list] = {"long": [], "revenue": [], "growth": []}
     market_map = dict(zip(universe["stock_id"], universe["market"]))
 
     # 大盤過濾：今天是否多頭趨勢
@@ -185,6 +190,14 @@ def screen_today(universe: pd.DataFrame,
             df_rv = signal_revenue_momentum(price, inst_arg, rev_arg, per_df=per_arg, market_filter=mf)
             if bool(df_rv.iloc[-1]["signal_rev"]):
                 results["revenue"].append(_summary_row(sid, market, df_rv, "revenue"))
+
+            # 策略六：高成長突破（需基本面 pass，loose market filter）
+            if sid in fund_ok:
+                df_g = signal_growth_breakout(price, inst_arg, rev_arg,
+                    market_filter=mf, inst_threshold=_S6_INST_THR,
+                    rev_growth_min=_S6_REV_MIN)
+                if bool(df_g.iloc[-1].get("signal_growth", False)):
+                    results["growth"].append(_summary_row(sid, market, df_g, "growth"))
 
         except Exception as e:
             cls = type(e).__name__

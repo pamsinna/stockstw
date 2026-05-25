@@ -324,6 +324,8 @@ def run_all_strategies(universe: pd.DataFrame,
                 extra["per_df"] = per if not per.empty else None
             if "inst_threshold" in strategy:
                 extra["inst_threshold"] = strategy["inst_threshold"]
+            if "rev_growth_min" in strategy:
+                extra["rev_growth_min"] = strategy["rev_growth_min"]
             try:
                 df = signal_fn(
                     price,

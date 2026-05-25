@@ -378,6 +378,79 @@ def signal_reversal_inst(
     return _apply_market_filter(df, "signal_reversal", market_filter)
 
 
+# ─── 策略 S6：高成長突破（regime-conditional aggressor）────────────────────
+# 補 S4 抓不到的高 PE / 高成長飆股。AI bull regime 下 OOS Sharpe 12.8，
+# 但無 AI bull 的 IS 只有 Sharpe 2.6，視為「順勢加強」而非全週期 core。
+
+def signal_growth_breakout(df: pd.DataFrame,
+                            inst_df: pd.DataFrame | None = None,
+                            rev_df: pd.DataFrame | None = None,
+                            market_filter: pd.Series | None = None,
+                            inst_threshold: int = 5_000_000,
+                            rev_growth_min: float = 10.0,
+                            breakout_days: int = 60,
+                            vol_mult: float = 1.5) -> pd.DataFrame:
+    """
+    S6 高成長突破：抓 S4 因 PER<20 條件擋下的高 PE 飆股
+    （鴻勁、奇鋐、世芯-KY 這類）
+
+    進場條件（全部滿足）：
+      1. 月營收 3M sum 比 3M-3M 前成長 > rev_growth_min%
+         （用 3M-vs-3M 取代 YoY，IPO 新股 < 12 個月歷史也適用）
+      2. 收盤 = breakout_days 日新高（突破，而非 S4 的金叉）
+      3. 當日量 > 20 日均量 × vol_mult（量增配合突破）
+      4. 收盤 > MA60（清晰上升趨勢）
+      5. 外資 + 投信 60 日 > inst_threshold 張
+
+    出場（在 STRATEGIES 設定）：
+      trail_trigger 0.80 / trail_pct 0.15 — 漲 +80% 才啟動 trailing
+      讓贏家跑得夠久才鎖利；之前固定停利的 80% 機會會被砍掉
+      勝率僅 ~38%，靠少數大贏家拉抬，連虧 5-6 筆是正常
+    """
+    df = add_all(df).copy()
+    if inst_df is not None and not inst_df.empty:
+        df = merge_institutional(df, inst_df)
+    df["signal_growth"] = False
+
+    # 月營收 3M-vs-3M：需至少 6 個月歷史才能算
+    if rev_df is None or rev_df.empty or len(rev_df) < 6:
+        return _apply_market_filter(df, "signal_growth", market_filter)
+
+    rev = rev_df.sort_values("date").copy()
+    rev["revenue"] = pd.to_numeric(rev["revenue"], errors="coerce")
+    rev["rev_3m_sum"] = rev["revenue"].rolling(3, min_periods=3).sum()
+    rev["rev_3m_growth"] = (rev["rev_3m_sum"] / rev["rev_3m_sum"].shift(3) - 1) * 100
+    rev["pub_date"] = rev["date"].apply(
+        lambda d: pd.Timestamp(d.year + (1 if d.month == 12 else 0),
+                               1 if d.month == 12 else d.month + 1, 11))
+    rev_pub = rev[["pub_date", "rev_3m_growth"]].dropna().sort_values("pub_date")
+    rev_pub = rev_pub.rename(columns={"pub_date": "date"})
+
+    df = df.sort_values("date").reset_index(drop=True)
+    df["rev_3m_growth"] = pd.merge_asof(df, rev_pub, on="date", direction="backward")["rev_3m_growth"].values
+
+    cond_rev = df["rev_3m_growth"] > rev_growth_min
+    cond_break = df["close"] >= df["close"].rolling(breakout_days, min_periods=breakout_days).max()
+    cond_vol = df["volume"] > df["volume"].rolling(20, min_periods=10).mean() * vol_mult
+    cond_ma60 = df["close"] > df["ma60"]
+
+    if "foreign_" in df.columns or "trust" in df.columns:
+        f60 = (df["foreign_"].rolling(60, min_periods=30).sum()
+               if "foreign_" in df.columns else pd.Series(0.0, index=df.index))
+        t60 = (df["trust"].rolling(60, min_periods=30).sum()
+               if "trust" in df.columns else pd.Series(0.0, index=df.index))
+        df["f_60d"] = f60
+        df["t_60d"] = t60
+        cond_inst = (f60 + t60) > inst_threshold
+    else:
+        df["f_60d"] = 0.0
+        df["t_60d"] = 0.0
+        cond_inst = pd.Series(False, index=df.index)  # 沒法人資料保守不發
+
+    df["signal_growth"] = cond_rev & cond_break & cond_vol & cond_ma60 & cond_inst
+    return _apply_market_filter(df, "signal_growth", market_filter)
+
+
 # ─── 全策略清單（供批次回測用）────────────────────────────────────────────────
 
 STRATEGIES = [
@@ -404,5 +477,22 @@ STRATEGIES = [
         "needs_revenue": True,
         "needs_per": True,
         "needs_fundamental": True,
+    },
+    {
+        "name": "高成長突破",
+        "signal_fn": signal_growth_breakout,
+        "signal_col": "signal_growth",
+        "timeframe": "growth",
+        "default_tp": 0.30, "default_sl": 0.10, "default_hold": 90,
+        "trail_trigger": 0.80,  # 漲 +80% 才啟動 trailing（讓贏家跑）
+        "trail_pct": 0.15,
+        "strict_market": False,  # 用 loose mf（取消 strict 在 IS 表現較好）
+        "needs_revenue": True,
+        "needs_fundamental": True,
+        "inst_threshold": 5_000_000,
+        "rev_growth_min": 10.0,
+        # ⚠️ regime-conditional: 在 AI bull (2023-25) Sharpe 12.8、
+        # 無 AI bull (2019-22) Sharpe 2.6。視為「順勢加強」而非全週期 core。
+        # 勝率 ~38% — 連虧 5-6 筆是正常，部位應比 S4 小。
     },
 ]
