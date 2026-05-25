@@ -393,6 +393,7 @@ STRATEGIES = [
         "needs_per": True,
         "needs_fundamental": True,
         "inst_threshold": 1_000_000,
+        "retail_max_pct": 50.0,  # 排除散戶持股 >50% 的票（套牢盤厚）
     },
     {
         "name": "月營收動能",

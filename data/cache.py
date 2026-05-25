@@ -92,6 +92,16 @@ def init_db() -> None:
         last_date  TEXT,
         PRIMARY KEY (stock_id, dataset)
     );
+
+    CREATE TABLE IF NOT EXISTS shareholding (
+        stock_id          TEXT NOT NULL,
+        date              TEXT NOT NULL,  -- 週報日期 YYYY-MM-DD
+        large_holder_pct  REAL,           -- 千張大戶比例 (持股 ≥1000張 = level 15-16)
+        mid_holder_pct    REAL,           -- 中戶比例 (持股 200-1000張 = level 11-14)
+        retail_pct        REAL,           -- 散戶比例 (持股 <50張 = level 1-8)
+        total_shares      REAL,           -- 集保庫存總股數
+        PRIMARY KEY (stock_id, date)
+    );
     """
     with _conn() as con:
         con.executescript(ddl)
@@ -327,5 +337,62 @@ def last_per_date(stock_id: str) -> str | None:
         row = con.execute(
             "SELECT last_date FROM fetch_log WHERE stock_id=? AND dataset='per'",
             (stock_id,)
+        ).fetchone()
+    return row[0] if row else None
+
+
+# ─── shareholding (TDCC 週報) ─────────────────────────────────────────────────
+
+def save_shareholding(df: pd.DataFrame) -> int:
+    """bulk save：一次寫入整週全市場資料。
+    df 欄位：stock_id, date, large_holder_pct, mid_holder_pct, retail_pct, total_shares
+    """
+    if df.empty:
+        return 0
+    df = df.copy()
+    df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
+    with _conn() as con:
+        df.to_sql("shareholding", con, if_exists="append", index=False,
+                  method=_insert_or_ignore)
+        # fetch_log 用 stock_id="_GLOBAL" 記錄全市場 snapshot 日
+        con.execute(
+            "INSERT OR REPLACE INTO fetch_log VALUES (?,?,?)",
+            ("_GLOBAL", "shareholding", df["date"].max())
+        )
+    return len(df)
+
+
+def load_shareholding_latest() -> pd.DataFrame:
+    """讀取每支股票最新一筆 shareholding 資料"""
+    q = """
+    SELECT s.* FROM shareholding s
+    JOIN (
+        SELECT stock_id, MAX(date) AS max_date
+        FROM shareholding GROUP BY stock_id
+    ) m ON s.stock_id = m.stock_id AND s.date = m.max_date
+    """
+    with _conn() as con:
+        df = pd.read_sql(q, con)
+    if not df.empty:
+        df["date"] = pd.to_datetime(df["date"])
+    return df
+
+
+def load_shareholding(stock_id: str, start: str = "2018-01-01") -> pd.DataFrame:
+    """讀取單股 shareholding 歷史"""
+    with _conn() as con:
+        df = pd.read_sql(
+            "SELECT * FROM shareholding WHERE stock_id=? AND date>=? ORDER BY date",
+            con, params=[stock_id, start]
+        )
+    if not df.empty:
+        df["date"] = pd.to_datetime(df["date"])
+    return df
+
+
+def last_shareholding_date() -> str | None:
+    with _conn() as con:
+        row = con.execute(
+            "SELECT last_date FROM fetch_log WHERE stock_id='_GLOBAL' AND dataset='shareholding'"
         ).fetchone()
     return row[0] if row else None

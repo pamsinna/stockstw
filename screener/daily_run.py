@@ -15,7 +15,7 @@ from config import DATA_START
 from data.cache import (
     init_db, load_prices, load_institutional, load_monthly_revenue, load_per,
     save_prices, save_institutional, last_price_date, last_institutional_date,
-    last_revenue_date, mark_fetch_skip,
+    last_revenue_date, mark_fetch_skip, load_shareholding_latest,
 )
 from data.universe import build_universe
 from data.fetcher import fetch_price, fetch_institutional, fetch_monthly_revenue
@@ -34,6 +34,7 @@ TAIEX_PROXY = "0050"
 
 _S4 = next(s for s in STRATEGIES if s["name"] == "中長線_品質股低接")
 _S4_INST_THR = _S4.get("inst_threshold", 0)
+_S4_RETAIL_MAX = _S4.get("retail_max_pct")
 
 
 def incremental_update(universe: pd.DataFrame) -> None:
@@ -131,6 +132,16 @@ def screen_today(universe: pd.DataFrame,
         fund_ok = set(fund_df[fund_df["passes_filter"]]["stock_id"])
         logger.info(f"Fundamental pass: {len(fund_ok)} / {len(universe)}")
 
+    # 散戶比例 filter（用 TDCC 最新一週快照；只套用於 S4，從 STRATEGIES 讀）
+    retail_ok_s4: set[str] | None = None
+    if _S4_RETAIL_MAX is not None:
+        sh = load_shareholding_latest()
+        if not sh.empty:
+            retail_ok_s4 = set(sh[sh["retail_pct"] <= _S4_RETAIL_MAX]["stock_id"])
+            logger.info(f"S4 retail filter ≤ {_S4_RETAIL_MAX}%: {len(retail_ok_s4)} stocks")
+        else:
+            logger.warning("Shareholding data unavailable — S4 retail filter disabled")
+
     logger.info("Generating signals...")
     mf = market_filter
     strict_mf = strict_market_filter
@@ -162,7 +173,8 @@ def screen_today(universe: pd.DataFrame,
         per_arg = per if not per.empty else None
 
         try:
-            if sid in fund_ok:
+            s4_ok = sid in fund_ok and (retail_ok_s4 is None or sid in retail_ok_s4)
+            if s4_ok:
                 df_l = signal_longterm_quality_entry(price, inst_arg, per_df=per_arg, market_filter=strict_mf, inst_threshold=_S4_INST_THR)
                 if bool(df_l.iloc[-1]["signal_long"]):
                     results["long"].append(_summary_row(sid, market, df_l, "long"))

@@ -297,8 +297,19 @@ def run_all_strategies(universe: pd.DataFrame,
         use_strict  = strategy.get("strict_market", False)
         active_mf   = strict_market_filter if use_strict else market_filter
 
+        # 散戶比例上限 filter（用最新一週 TDCC shareholding 快照）
+        retail_max = strategy.get("retail_max_pct")
+        retail_ok: set[str] | None = None
+        if retail_max is not None:
+            from data.cache import load_shareholding_latest
+            sh = load_shareholding_latest()
+            retail_ok = set(sh[sh["retail_pct"] <= retail_max]["stock_id"])
+            logger.info(f"  Retail filter ≤ {retail_max}%: {len(retail_ok)} stocks pass")
+
         for sid in tqdm(stocks, desc=name, leave=False):
             if needs_fund and sid not in fund_ok:
+                continue
+            if retail_ok is not None and sid not in retail_ok:
                 continue
             price = load_prices(sid, start=DATA_START, end=end)
             if len(price) < 60:  # 資料太少跳過

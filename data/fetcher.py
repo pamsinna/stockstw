@@ -246,3 +246,56 @@ def rate_limit_sleep(n_stocks: int, req_per_stock: int = 3) -> None:
     if total > 500:
         per_req = 3600 / 600  # 6 秒/請求
         logger.info(f"Throttling: {total} requests estimated, sleeping {per_req:.1f}s/req")
+
+
+# ─── TDCC 集保結算所：千張大戶週報 ─────────────────────────────────────────────
+
+TDCC_OPENDATA_URL = "https://smart.tdcc.com.tw/opendata/getOD.ashx?id=1-5"
+_TDCC_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
+    "Referer": "https://www.tdcc.com.tw/portal/zh/smWeb/qryStock",
+}
+
+
+def fetch_tdcc_shareholding() -> pd.DataFrame:
+    """下載 TDCC 最新一週集保戶股權分散表（全市場 bulk CSV）。
+
+    持股分級 levels:
+      1=1-999股、2-3=1k-10k、4-8=10k-50k、9-10=50k-200k、
+      11=200k-400k、12-14=400k-1M、15=>1M(千張大戶)、16=備註、17=合計
+
+    回傳每股一行：
+      stock_id, date, large_holder_pct (15-16),
+      mid_holder_pct (11-14), retail_pct (1-8), total_shares (level 17)
+    """
+    import io
+    r = _session.get(TDCC_OPENDATA_URL, headers=_TDCC_HEADERS, timeout=60)
+    r.raise_for_status()
+    raw = pd.read_csv(io.StringIO(r.text), dtype={"證券代號": str})
+    raw.columns = ["date", "stock_id", "level", "holders", "shares", "pct"]
+    raw["stock_id"] = raw["stock_id"].str.strip()
+    raw["date"] = pd.to_datetime(raw["date"].astype(str), format="%Y%m%d").dt.strftime("%Y-%m-%d")
+
+    # 只保留 4 碼純數字（過濾 ETF/權證/特別股的 6 碼代號）
+    raw = raw[raw["stock_id"].str.match(r"^\d{4}$")].copy()
+    if raw.empty:
+        logger.warning("TDCC shareholding: no 4-digit stocks in response")
+        return pd.DataFrame()
+
+    # 用 pivot 把每支股票的各 level pct 攤平
+    pct_pivot = raw.pivot_table(index=["stock_id", "date"], columns="level",
+                                values="pct", aggfunc="sum", fill_value=0)
+    # total_shares 從 level 17 取（合計）
+    total = raw[raw["level"] == 17].set_index(["stock_id", "date"])["shares"]
+
+    def _pct_sum(levels: list[int]) -> pd.Series:
+        cols = [lv for lv in levels if lv in pct_pivot.columns]
+        return pct_pivot[cols].sum(axis=1) if cols else pd.Series(0.0, index=pct_pivot.index)
+
+    out = pd.DataFrame({
+        "large_holder_pct": _pct_sum([15, 16]),
+        "mid_holder_pct":   _pct_sum([11, 12, 13, 14]),
+        "retail_pct":       _pct_sum([1, 2, 3, 4, 5, 6, 7, 8]),
+        "total_shares":     total.reindex(pct_pivot.index).fillna(0),
+    }).reset_index()
+    return out
