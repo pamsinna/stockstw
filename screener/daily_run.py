@@ -16,9 +16,11 @@ from data.cache import (
     init_db, load_prices, load_institutional, load_monthly_revenue, load_per,
     save_prices, save_institutional, last_price_date, last_institutional_date,
     last_revenue_date, mark_fetch_skip, load_shareholding_latest,
+    save_shareholding, last_shareholding_date,
 )
 from data.universe import build_universe
-from data.fetcher import fetch_price, fetch_institutional, fetch_monthly_revenue
+from data.fetcher import (fetch_price, fetch_institutional, fetch_monthly_revenue,
+                          fetch_tdcc_shareholding)
 from backtest.run_backtest import build_market_filter, _normalize_and_save_revenue
 from fundamental.quality_filter import batch_fundamentals
 from technical.signals import (
@@ -103,6 +105,21 @@ def incremental_update(universe: pd.DataFrame) -> None:
                     mark_fetch_skip(sid, "revenue")
                 elif not rev.empty:
                     _normalize_and_save_revenue(sid, rev)
+
+    # TDCC 千張大戶週報：超過 7 天才更新（一週公布一次）
+    last_sh = last_shareholding_date()
+    today_dt = datetime.now(_TZ).date()
+    if last_sh is None or (today_dt - datetime.fromisoformat(last_sh).date()).days >= 7:
+        logger.info("Refreshing TDCC shareholding (weekly snapshot)...")
+        try:
+            sh_df = fetch_tdcc_shareholding()
+            if not sh_df.empty:
+                n = save_shareholding(sh_df)
+                logger.info(f"  TDCC saved: {n} rows for week {sh_df['date'].iloc[0]}")
+            else:
+                logger.warning("TDCC shareholding fetch returned empty")
+        except Exception as e:
+            logger.warning(f"TDCC fetch failed (non-fatal): {e}")
 
 
 def screen_today(universe: pd.DataFrame,
