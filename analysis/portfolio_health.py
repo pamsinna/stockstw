@@ -47,8 +47,20 @@ def load_portfolio(path: str = "portfolio.yml") -> list[dict]:
     return data.get("holdings", []) or []
 
 
-def check_one(stock_id: str, entry_date: str, entry_price: float) -> dict:
-    """對單一持股做健診，回傳 dict"""
+def estimate_entry_date(price_df: pd.DataFrame, entry_price: float) -> tuple[pd.Timestamp, bool]:
+    """根據 entry_price 反查最近的歷史交易日（用收盤價最接近的那天）。
+    回傳 (estimated_date, is_estimated)"""
+    if price_df.empty:
+        return pd.Timestamp.today(), True
+    p = price_df.copy()
+    p["diff"] = (p["close"] - entry_price).abs()
+    # 取最接近 + 較近期的（避免抓到很久以前的相近價）
+    best = p.sort_values(["diff", "date"], ascending=[True, False]).iloc[0]
+    return pd.to_datetime(best["date"]), True
+
+
+def check_one(stock_id: str, entry_date: str | None, entry_price: float) -> dict:
+    """對單一持股做健診，回傳 dict。entry_date 留空時自動估算。"""
     price_df = load_prices(stock_id, start="2025-01-01")
     inst_df = load_institutional(stock_id, start="2025-01-01")
     if price_df.empty:
@@ -58,8 +70,12 @@ def check_one(stock_id: str, entry_date: str, entry_price: float) -> dict:
     current = float(last["close"])
     last_date = pd.to_datetime(last["date"]).date()
 
-    # 持倉後最高價（trailing 計算用）
-    entry_dt = pd.to_datetime(entry_date)
+    # 進場日：使用者填的優先；留空則自動估算
+    is_estimated = False
+    if entry_date is None or str(entry_date).strip() in ("", "auto", "?"):
+        entry_dt, is_estimated = estimate_entry_date(price_df, entry_price)
+    else:
+        entry_dt = pd.to_datetime(entry_date)
     held = price_df[price_df["date"] >= entry_dt]
     peak = float(held["close"].max()) if not held.empty else current
 
@@ -146,7 +162,8 @@ def check_one(stock_id: str, entry_date: str, entry_price: float) -> dict:
         "current": current,
         "last_date": last_date,
         "entry_price": entry_price,
-        "entry_date": entry_date,
+        "entry_date": entry_dt.date(),
+        "entry_estimated": is_estimated,
         "days_held": days_held,
         "peak": peak,
         "pnl_pct": pnl_pct,
@@ -189,8 +206,9 @@ def format_report(results: list[dict], name_map: dict) -> str:
             sid = r["stock_id"]
             name = name_map.get(sid, "?")
             pnl_sign = "+" if r["pnl_pct"] >= 0 else ""
+            est_mark = "≈" if r.get("entry_estimated") else ""
             head = (f"  {sid} {name}  ${r['current']:.0f}  "
-                    f"{pnl_sign}{r['pnl_pct']:.1f}% ({r['days_held']}d)  "
+                    f"{pnl_sign}{r['pnl_pct']:.1f}% ({r['days_held']}d{est_mark})  "
                     f"AQS {r['aqs_score']:.0f}" if r['aqs_score'] is not None else
                     f"  {sid} {name}  ${r['current']:.0f}  {pnl_sign}{r['pnl_pct']:.1f}% AQS N/A")
             if r.get("aqs_stage"):
@@ -234,7 +252,7 @@ def main():
     for h in holdings:
         sid = str(h["stock_id"])
         ep = float(h["entry_price"])
-        ed = str(h["entry_date"])
+        ed = h.get("entry_date")  # 可能是 None / "auto" / 日期字串
         try:
             r = check_one(sid, ed, ep)
         except Exception as e:
