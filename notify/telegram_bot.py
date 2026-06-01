@@ -233,9 +233,22 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
             )
         messages.append("\n".join(g_lines))
 
-    # ── 策略七：累積前夕（狙擊手型，每年 ~5 筆訊號）──────────────────────
+    # ── 策略七：累積前夕（狙擊手型，每年 ~70 筆訊號）──────────────────────
     if not accum_df.empty:
-        if "f_60d" in accum_df.columns and "t_60d" in accum_df.columns:
+        # 排序：先按 above_ma20（優先級高的在上），再按法人 60 日由大到小
+        if "above_ma20" in accum_df.columns:
+            accum_df = accum_df.assign(
+                _sort_key=accum_df["above_ma20"].astype(int)
+            )
+            if "f_60d" in accum_df.columns and "t_60d" in accum_df.columns:
+                accum_df["_inst60"] = accum_df["f_60d"].fillna(0) + accum_df["t_60d"].fillna(0)
+                accum_df = accum_df.sort_values(["_sort_key", "_inst60"],
+                                                ascending=[False, False])
+                accum_df = accum_df.drop(columns=["_sort_key", "_inst60"])
+            else:
+                accum_df = accum_df.sort_values("_sort_key", ascending=False)
+                accum_df = accum_df.drop(columns="_sort_key")
+        elif "f_60d" in accum_df.columns and "t_60d" in accum_df.columns:
             accum_df = accum_df.assign(
                 _inst60=accum_df["f_60d"].fillna(0) + accum_df["t_60d"].fillna(0)
             ).sort_values("_inst60", ascending=False).drop(columns="_inst60")
@@ -243,7 +256,8 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
             f"🎯 <b>策略七：累積前夕</b>  共 {len(accum_df)} 支",
             "停損 -20%（寬）  trailing +80%/-15%  最長 180 天",
             "<i>📡 抓「法人偷收貨、股價還沒反映」的早中期累積</i>",
-            "<i>⚠️ 勝率 ~44%，連虧 3-4 筆是正常；部位建議 S4 的 1/3</i>\n",
+            "<i>⚡ = 已破 MA20（趨勢較確定、勝率較高，優先看）</i>",
+            "<i>⚠️ 勝率 ~52%，連虧 3-4 筆是正常；部位建議 S4 的 1/3</i>\n",
         ]
         for _, row in accum_df.head(MAX_POSITIONS).iterrows():
             emoji = MARKET_EMOJI.get(row.get("market", "TWSE"), "⚪")
@@ -259,8 +273,10 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
             aqs_line = (f"\n  AQS {aqs:.0f}  {stage}  {verdict}"
                         if not pd.isna(aqs) else "")
             name = names.get(sid, "")
+            # ⚡ 標籤：close > MA20（基於失敗分析：勝率 66%→72%）
+            tag = "⚡ " if row.get("above_ma20", False) else "  "
             a_lines.append(
-                f"{emoji} <b>{sid} {name}</b>  ${close}  法人60日{inst_str}"
+                f"{tag}{emoji} <b>{sid} {name}</b>  ${close}  法人60日{inst_str}"
                 f"{aqs_line}"
             )
         messages.append("\n".join(a_lines))
