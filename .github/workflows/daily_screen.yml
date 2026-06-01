@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     permissions:
-      contents: read  # checkout + release download
+      contents: write  # checkout + release download + release upload (DB snapshot)
 
     steps:
       - name: Checkout
@@ -101,3 +101,38 @@ jobs:
           name: signals-${{ github.run_id }}
           path: reports/signals_*.csv
           retention-days: 7
+
+      # 上傳更新後的 DB 到 GitHub Release（給本地同步用）
+      # 使用固定 tag `db-daily-latest`，每次 force-update 覆蓋
+      - name: Upload DB snapshot to release
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          # 防止 SQLite 寫到一半被 tar 讀到（保險措施）
+          pkill -f "python main.py" 2>/dev/null || true
+          sleep 3
+
+          # 壓縮 DB
+          echo "Compressing cache.db ($(du -sh data/cache.db | cut -f1))..."
+          gzip -k -9 data/cache.db
+          echo "Compressed: $(du -sh data/cache.db.gz | cut -f1)"
+
+          TAG="db-daily-latest"
+          DATE=$(date -u +"%Y-%m-%d")
+          TITLE="Daily DB snapshot ${DATE}"
+          NOTES="Auto-updated by daily_screen.yml on ${DATE} UTC.
+
+          Restore locally:
+              gh release download ${TAG} --repo pamsinna/stockstw --pattern 'cache.db.gz' --output data/cache.db.gz --clobber
+              gzip -d -f data/cache.db.gz"
+
+          # 砍掉舊 release（若存在）+ 重新建立（GitHub 不支援 release file replace）
+          gh release delete "$TAG" --repo pamsinna/stockstw --yes --cleanup-tag 2>/dev/null || true
+          gh release create "$TAG" data/cache.db.gz \
+            --repo pamsinna/stockstw \
+            --title "$TITLE" \
+            --notes "$NOTES"
+
+          echo "DB snapshot uploaded to release tag: $TAG"
