@@ -29,6 +29,7 @@ from technical.signals import (
     signal_growth_breakout,
     STRATEGIES,
 )
+from analysis.aqs import compute_aqs
 
 logger = logging.getLogger(__name__)
 
@@ -225,6 +226,20 @@ def screen_today(universe: pd.DataFrame,
         total = sum(signal_errors.values())
         breakdown = ", ".join(f"{cls}={n}" for cls, n in sorted(signal_errors.items()))
         logger.warning(f"Signal computation failed for {total} stocks ({breakdown})")
+
+    # 對每個訊號補上 AQS（累積品質分）+ stage + verdict
+    # 只給 S4 (long) 和 S6 (growth) 加；S5 月營收動能本質不同不適用
+    for tf in ("long", "growth"):
+        for row in results[tf]:
+            sid = row["stock_id"]
+            try:
+                aqs = compute_aqs(sid)
+                if aqs is not None:
+                    row["aqs_score"] = aqs["score"]
+                    row["aqs_stage"] = aqs["stage"]
+                    row["aqs_verdict"] = aqs["verdict"]
+            except Exception as e:
+                logger.debug(f"AQS compute failed for {sid}: {e}")
 
     return {
         k: pd.DataFrame(v).sort_values("vol_ratio", ascending=False)

@@ -156,9 +156,15 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
             inst60  = (0 if pd.isna(f60) else f60) + (0 if pd.isna(t60) else t60)
             inst_str = f"+{int(inst60//1000)}K" if inst60 > 0 else f"{int(inst60//1000)}K"
             name = names.get(sid, "")
+            aqs = row.get("aqs_score", float("nan"))
+            stage = row.get("aqs_stage", "")
+            verdict = row.get("aqs_verdict", "")
+            aqs_line = (f"  AQS {aqs:.0f}  {stage}  {verdict}"
+                        if not pd.isna(aqs) else "")
             lines.append(
                 f"{emoji} <b>{sid} {name}</b>  ${close}  "
                 f"BB{bb_str}  KD{kd:.0f}  RSI{rsi:.0f}  本益比{per_str}  法人60日{inst_str}"
+                f"{aqs_line}"
             )
         messages.append("\n".join(lines))
         _append_signal_log(long_df, date)
@@ -214,9 +220,15 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
             inst_str = f"+{int(inst60//1000)}K" if inst60 > 0 else f"{int(inst60//1000)}K"
             vol_s = f"{vol_r:.1f}x" if not pd.isna(vol_r) else "—"
             name = names.get(sid, "")
+            aqs = row.get("aqs_score", float("nan"))
+            stage = row.get("aqs_stage", "")
+            verdict = row.get("aqs_verdict", "")
+            aqs_line = (f"\n  AQS {aqs:.0f}  {stage}  {verdict}"
+                        if not pd.isna(aqs) else "")
             g_lines.append(
                 f"{emoji} <b>{sid} {name}</b>  ${close}  "
                 f"RSI{rsi:.0f}  量{vol_s}  法人60日{inst_str}"
+                f"{aqs_line}"
             )
         messages.append("\n".join(g_lines))
 
