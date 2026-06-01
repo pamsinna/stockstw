@@ -114,9 +114,10 @@ jobs:
           pkill -f "python main.py" 2>/dev/null || true
           sleep 3
 
-          # 壓縮 DB
+          # 壓縮 DB（先清舊檔避免 gzip 拒絕覆蓋）
+          rm -f data/cache.db.gz
           echo "Compressing cache.db ($(du -sh data/cache.db | cut -f1))..."
-          gzip -k -9 data/cache.db
+          gzip -k -9 -f data/cache.db
           echo "Compressed: $(du -sh data/cache.db.gz | cut -f1)"
 
           TAG="db-daily-latest"
