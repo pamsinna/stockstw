@@ -1,263 +1,282 @@
-# Taiwan Stock Auto-Screener
+# 台股自動選股機器人
 
-End-to-end automated screening system for ~1,100 Taiwan-listed equities (TWSE, TPEx, Emerging).
+每天自動掃描全市場 ~1,100 支台股（上市 + 上櫃 + 興櫃），把符合策略條件的股票用 Telegram / Discord 推到你手機上。
 
-Runs daily via GitHub Actions: fetches incremental market data, applies fundamental and technical filters across all stocks, and delivers trade signals to Telegram or Discord.
-
-> **Disclaimer:** This is a personal engineering project. Nothing in this repository constitutes investment advice.
+> **聲明**：這是個人工程練習作品。本 repo 內容不構成任何投資建議。
 
 ---
 
-## Architecture
+## 系統架構
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│  Data Sources                                           │
-│  FinMind API (price, institutional, revenue, PER)       │
-│  TWSE / TPEx official API (stock list)                  │
-└────────────────────┬────────────────────────────────────┘
-                     │ HTTP  (rate-limited: 600 req/hr)
-                     ▼
-┌─────────────────────────────────────────────────────────┐
-│  data/fetcher.py                                        │
-│  Retry logic · 402/403 permanent-skip · 429 backoff     │
-└────────────────────┬────────────────────────────────────┘
-                     │ DataFrame
-                     ▼
-┌─────────────────────────────────────────────────────────┐
-│  data/cache.py  ──  SQLite (data/cache.db)              │
-│  Incremental upsert · fetch_log resume cursor           │
-│  Tables: daily_price · institutional · monthly_revenue  │
-│          financial · per · universe · fetch_log         │
-└──────────┬────────────────────────┬─────────────────────┘
-           │                        │
-           ▼                        ▼
-┌──────────────────┐   ┌────────────────────────────────┐
-│  fundamental/    │   │  technical/                    │
-│  quality_filter  │   │  indicators.py  signals.py     │
-│  EPS · ROE       │   │  MA · KD · MACD · BB · RSI     │
-│  Gross margin    │   │  Institutional 60-day flow     │
-│  OCF · Revenue   │   │  Market filter (0050 proxy)    │
-└──────────┬───────┘   └────────────────┬───────────────┘
-           │                            │
-           └──────────────┬─────────────┘
-                          │ Signal DataFrame
-                          ▼
-┌─────────────────────────────────────────────────────────┐
-│  screener/daily_run.py                                  │
-│  Incremental update → fundamental gate → signal scan    │
-│  Staleness guard: skip stocks lagging behind 0050 date  │
-│  Output: reports/signals_{strategy}_{date}.csv          │
-└────────────────────┬────────────────────────────────────┘
-                     │
-                     ▼
-┌─────────────────────────────────────────────────────────┐
-│  notify/                                                │
-│  Telegram (HTML formatting · win-rate monitor)          │
-│  Discord  (Markdown · 2000-char chunking)               │
-│  Dispatcher routes based on env vars                    │
-└─────────────────────────────────────────────────────────┘
+資料來源（FinMind + TWSE + TDCC）
+        ↓
+資料層（SQLite 本地快取，斷點續跑）
+        ↓
+篩選層（基本面 + 技術指標 + AQS 累積品質）
+        ↓
+策略層（S4 / S5 / S6 / S7 四個策略並行）
+        ↓
+推播層（Telegram / Discord，每天 17:00 台灣時間）
 ```
 
 ---
 
-## 策略總覽
+## 四個策略 — 一句話介紹
 
-三個 live strategies，性格不同、互相補位：
+每個策略**性格不同、互相補位**。你不用全部開，挑符合你個性的：
 
-| | 策略 | 性格 | 出場 | OOS Sharpe | OOS 年化 | OOS MaxDD |
-|---|---|---|---|---|---|---|
-| **S4** | 中長線_品質股低接 | 巴菲特型：低 PE 品質股守正 | trail +20%/-15% | **12.92** | +38.97% | **-6.85%** |
-| **S5** | 月營收動能 | 林區型：每月情報窗業績轉折 | TP+40% / SL-12% | **14.22** | +50.60% | -8.37% |
-| **S6** | 高成長突破 | O'Neil 型：AI 牛市追飆股 | trail +80%/-15% | 12.81 | +52.56% | -10.38% |
+| 策略 | 比喻 | 在找什麼樣的股票？ | 一年大約幾筆訊號 |
+|------|------|------------------|----------------|
+| **S4 中長線品質股** | 巴菲特 | **便宜的好公司、法人在偷買** | 38 筆 |
+| **S5 月營收動能** | 彼得林區 | **業績剛剛轉好的股票** | 31 筆 |
+| **S6 高成長突破** | 歐尼爾 | **AI 牛市裡正在飆漲的股票** | 38 筆 |
+| **S7 累積前夕** | 狙擊手 | **法人偷收貨、股價還沒漲** | 70+ 筆 |
 
-OOS = Out-of-sample 驗證期 2023-01-01 ~ 2025-12-31。
-回測扣手續費 0.1425% × 2、證交稅 0.3%（興櫃 0.15%）、滑價 0.1%。
+### 績效快照（OOS 2023-2025）
 
----
+| | 交易數 | 勝率 | 年化報酬 | Sharpe | 最大回撤 |
+|---|---|---|---|---|---|
+| S4 | 114 | 64% | +39% | 12.92 | -6.85% |
+| S5 | 94 | 59% | +51% | 14.22 | -8.37% |
+| S6 | 114 | 38% | +53% | 12.81 | -10.4% |
+| S7 | 222 | 52% | +57% | 27.55 | -0.87% |
 
-## 策略邏輯
-
-### 策略四（S4）中長線_品質股低接
-
-**目標股**：基本面紮實、估值合理、法人正在累積、技術面正在整理結束的「便宜好公司」。
-
-**池子過濾**（cross-stock）：
-- EPS TTM > 1
-- 毛利率 > 15%
-- 經營現金流 (OCF) > 0
-- ROE ≥ 12%（從 IncomeAfterTaxes / Equity 自算）
-- EPS YoY 連續 2 季成長
-- 散戶持股 ≤ 50%（TDCC 千張大戶週報，排除套牢盤厚的票）
-
-**進場條件**（per-row）：
-- 收盤 > MA60
-- MACD 金叉 3 日視窗內
-- BB% 30-120%
-- RSI < 70
-- 外資 + 投信 60 日累計 > 1M 張
-- PER < 20 或 NaN
-- 大盤 strict 多頭（4 條全到位：close>MA60 & close>MA20 & MA60升 & MA20升）
-
-**出場**：
-- 漲到 +20% 啟動 trailing stop（從峰值跌 15% 出場）
-- 未達 +20% 時固定停損 -10% / 最長持有 90 天
-
-**OOS（2023-2025）**：
-
-| 交易 | 勝率 | EV/筆 | 年化 | Sharpe | MaxDD |
-|------|------|------|------|--------|-------|
-| 114 | 64.0% | +16.68% | +38.97% | 12.92 | -6.85% |
-
-出場細項：trailing stop 68 筆 / 停損 39 筆 — 移動停利成主導出場代表「贏家被讓跑」。
+OOS = Out-of-Sample，意思是「策略開發時沒看過的時間段」，數字相對誠實。回測已扣手續費 0.285% + 證交稅 0.3% + 滑價 0.1%。
 
 ---
 
-### 策略五（S5）月營收動能
+## 各策略白話篩選邏輯
 
-**目標股**：每月營收公布後第一個交易日的「業績轉折」訊號。
+### 🏔 S4 中長線品質股低接
 
-**池子過濾**：同 S4 fundamental（EPS/毛利/OCF/ROE/EPS YoY 成長）
+**用一句話形容**：找便宜的好公司，剛好遇到法人在累積、技術線型整理結束、可以進場的時間點。
 
-**進場條件**（只在公布日後第一個交易日觸發，每月 1 次）：
-- 月營收 YoY > 15%
-- YoY 加速 > 5pp（vs 前 3 個月平均）
-- 過去 12 個月 ≥ 6 個月正成長
-- 2 年 CAGR > 5%（消除基期效應）
-- 外資 20 日累計 > 20 日均量的 0.5%
-- 站上 MA60 或「近 5 日跌幅 > -8% 且當日紅 K」
-- PER < 20 或 NaN
-- 大盤 loose 多頭
+**第一道篩選 — 公司體質好不好**（六道硬性門檻）：
 
-**出場**：固定停利 +40% / 停損 -12% / 最長 120 天
+1. **「最近一年每股賺超過 1 元」** — 公司至少要會賺錢
+2. **「毛利率超過 15%」** — 賣的東西要有定價權，不是賣血汗
+3. **「每年現金都還是正的」** — 不是靠借錢撐場面
+4. **「股東報酬率超過 12%」** — 公司用股東的錢替你賺夠多
+5. **「最近 2 季 EPS 都比去年同期成長」** — 業績有在進步、不是吃老本
+6. **「散戶持股 ≤ 50%」** — 排除一堆套牢散戶的票（會有人砸盤）
 
-**OOS（2023-2025）**：
+**第二道篩選 — 進場時機對不對**（七個技術條件）：
 
-| 交易 | 勝率 | EV/筆 | 年化 | Sharpe | MaxDD |
-|------|------|------|------|--------|-------|
-| 94 | 58.5% | +11.70% | +50.60% | 14.22 | -8.37% |
+1. **股價站上 60 日均線** — 大趨勢是上升
+2. **MACD 黃金交叉在 3 日內** — 動能剛剛轉強
+3. **布林通道位置 30-120%** — 不要追到天花板
+4. **RSI < 70** — 還沒過熱
+5. **過去 60 天外資+投信淨買進超過 100 萬張** — 真的有法人在累積
+6. **本益比 < 20** 或沒資料 — 不要買貴股
+7. **大盤是強勢多頭**（四個指標全到位） — 順勢操作
 
----
+**出場規則**：股票漲 20% 後啟動「移動停利」（從最高點跌 15% 就出場）；沒漲到 20% 就用固定停損 -10%，最多持有 90 天。
 
-### 策略六（S6）高成長突破 — regime-conditional
-
-**目標股**：S4 因 PER<20 擋下的高 PE 飆股（鴻勁、奇鋐、世芯-KY 這類）。
-
-**池子過濾**：同 S4 fundamental（但**取消 PER 條件**）
-
-**進場條件**：
-- 月營收「3 個月 sum vs 3 個月前 sum」成長 > 10%（用 3M-vs-3M 取代 YoY，IPO 新股 < 12 個月歷史也適用）
-- 收盤 = 60 日新高（突破而非金叉，主升段股票很少出現金叉）
-- 當日量 > 20 日均量 × 1.5x
-- 收盤 > MA60
-- 外資 + 投信 60 日累計 > **5M 張**（5 倍 S4 門檻，更高選擇性）
-- 大盤 loose 多頭
-
-**出場**：
-- 漲到 **+80% 才啟動 trailing**（trail 15%）— 讓贏家跑得夠久
-- 未達 +80% 時固定停損 -10% / 最長 90 天
-
-**OOS（2023-2025）**：
-
-| 交易 | 勝率 | EV/筆 | 年化 | Sharpe | MaxDD |
-|------|------|------|------|--------|-------|
-| 114 | **37.7%** | +15.65% | +52.56% | 12.81 | -10.38% |
-
-⚠️ **regime-conditional 警告**：
-
-| 期間 | 年化 | Sharpe | MaxDD |
-|------|------|--------|-------|
-| In-Sample 2019-2022（非 AI bull）| +10.7% | 2.6 | -16.9% |
-| OOS 2023-2025（AI bull）| **+52.6%** | **12.8** | -10.4% |
-
-S6 OOS 漂亮的數字主要來自 2023-2025 AI 主升段的 regime。**IS 期間 Sharpe 只有 2.6**，遠不如 S4/S5。視為「順勢加強」而非全週期 core。若 AI 行情結束，手動關閉 S6 通知。
-
-**勝率僅 37.7%**：靠少數大贏家拉抬，**連虧 5-6 筆是正常**。建議部位 size 為 S4 的 1/2 ~ 2/3。
+**人話**：「找穩健好公司，等所有條件都對了再進場，賺夠就跑、不貪。」
 
 ---
 
-## 共用 invariant（重要設計約束）
+### 📊 S5 月營收動能
 
-- **No look-ahead bias**：訊號於 T 日收盤後計算，進場一律 T+1 開盤 + 滑價 0.1%。月營收訊號用 T+11 作為「資料可用日」（保守估，避開 10 日當天傍晚才公布的公司）。
-- **Strict market filter**（S4 用）：0050 收 > MA60 AND 收 > MA20 AND MA60 升 AND MA20 升，**四條全滿足才視為多頭**。回測顯示「四條全到」比「兩條到」Sharpe 多 0.6、MaxDD 少 2pp。
-- **Trailing stop 取代固定 TP**：用 trail 取代 +30% 強制停利，避免砍掉飆股尾巴。S4 用 trigger 20%/trail 15%（保守），S6 用 trigger 80%/trail 15%（激進）。
-- **資料新鮮度**：daily_run 以 0050 最後資料日作為「本日交易日」基準，任何股票價格資料落後則跳過，避免用舊資料產生訊號。
-- **0050 保護**：mark_fetch_skip() 拒絕標記 0050 為永久跳過，避免一次 403 就讓整個市場過濾失效。
+**用一句話形容**：每月 10 號台股公布上個月營收，第一個交易日抓「業績爆發」的股票。
 
----
+**第一道篩選**：跟 S4 一樣的公司體質（EPS、毛利率、ROE 等都要過關）
 
-## Stack
+**第二道篩選 — 業績轉折條件**（每月一次機會）：
 
-| Layer | Technology |
-|---|---|
-| Language | Python 3.11 |
-| Data wrangling | pandas, numpy |
-| Persistence | SQLite (via `sqlite3` + pandas `to_sql`) |
-| Market data | FinMind API, TWSE / TPEx official endpoints |
-| Scheduling | GitHub Actions (daily cron) |
-| Notifications | Telegram Bot API, Discord Webhooks |
-| Testing | pytest (43 unit tests) |
+1. **「最新一個月營收年增超過 15%」** — 業績明顯好轉
+2. **「成長還在加速」**（vs 過去 3 個月的成長率） — 不是慢慢爬，是衝刺
+3. **「過去 12 個月有 6 個月以上是正成長」** — 不是一次性事件，是趨勢
+4. **「2 年 CAGR > 5%」** — 排除「去年太爛所以今年數字好看」的假象
+5. **外資 20 日有買** — 法人也認可這個成長
+6. **股價沒有崩跌中** — 不要逢低接刀
+
+**出場規則**：賺 40% 停利 / 賠 12% 停損，最多 120 天。
+
+**人話**：「業績轉好的訊號出來，趁市場還沒反應前先卡位。」
 
 ---
 
-## Setup
+### 🚀 S6 高成長突破
+
+**用一句話形容**：跟著 AI 牛市的飆股跑，抓「正在突破創新高」的成長股。
+
+**第一道篩選**：基本面要過關（同 S4），**但取消「本益比 < 20」的限制**（因為飆股 PE 通常都很高，像鴻勁、奇鋐 PE 60-90 都正常）。
+
+**第二道篩選 — 抓飆股啟動點**：
+
+1. **「3 個月營收總和」比 6 個月前的「3 個月營收總和」成長超過 10%** — 業績還在加速。用 3M-vs-3M 而不是 YoY，是因為 IPO 新股沒有 12 個月歷史（鴻勁就是這種）
+2. **股價創 60 日新高** — 突破成立（不用等金叉，飆股很少回頭做金叉）
+3. **當天成交量比 20 日均量大 1.5 倍** — 有人在搶買
+4. **股價站上 60 日均線** — 趨勢明確
+5. **過去 60 天外資+投信淨買進超過 500 萬張**（S4 的 5 倍） — 法人共識超強
+6. **大盤是多頭**
+
+**出場規則**：股票漲 **80%** 才啟動 trailing（trail 15%）— 讓贏家跑夠久；沒漲到 80% 就用 -10% 停損，最多 90 天。
+
+**人話**：「AI 牛市裡正在飆漲的股票，趁法人在用力買的時候跟著進，可能 +100% 才出場。」
+
+**⚠️ 重要警告**：S6 是「regime-conditional」策略，**只在 AI 牛市這種行情有效**。歷史上 2019-2022 沒 AI 行情時 Sharpe 只有 2.6，不如 S4/S5。**如果大盤翻空頭，請手動關掉 S6 通知**。
+
+**勝率只有 37.7%**：意思是 10 筆有 6 筆是賠的，但賺的那 4 筆是大贏家（+50% ~ +200%）。心理要準備好「**連續 5-6 筆都是停損是正常**」，否則中途會放棄這策略。
+
+---
+
+### 🎯 S7 累積前夕（最新加入）
+
+**用一句話形容**：抓「法人正在偷偷收貨、但股價還沒反映」的早期累積階段——主升段啟動的前夕。
+
+**靈感來源**：精誠 6214 案例。2025 年 5 月時法人 60 日累計買了 5M 股，但股價只漲 13.7%（明顯反應不足），3 個禮拜後（6/1）突破，後續主升段啟動。S7 就是要在「下一個 6214 突破前」就埋伏進場。
+
+**第一道篩選**：基本面要過關（同 S4，需要連 2 季 EPS YoY 成長）。
+
+**第二道篩選 — 累積前夕的七個指標**：
+
+1. **過去 60 天外資+投信淨買進 ≥ 200 萬張** — 法人在累積（門檻比 S4 鬆，因為要抓「早期」）
+2. **過去 60 天股價漲幅在 -5% ~ +25% 之間** — 法人在買、股價還沒大漲。如果已經漲超過 25%，代表故事已被市場反映、進場太晚
+3. **股價在 60 日區間的「下方 75%」** — 離高點還有空間，突破還沒發生
+4. **AQS（累積品質分）≥ 60** — 用 5 個維度判斷「真的是累積、不是派發」（下方詳述）
+5. **AQS 第四維度（法人 vs 股價）沒紅旗** — 排除「法人在賣但股價還漲」這種散戶接刀的情境
+6. **大盤是多頭**
+7. **基本面通過**
+
+**出場規則**：
+- 停損 **-20%**（比其他策略寬，因為累積階段股價自然會在 ±10% 區間波動，太緊的停損會被洗掉）
+- 漲到 +80% 才啟動 trailing（同 S6）
+- 最多持有 180 天（給累積期足夠時間發酵）
+
+**人話**：「法人開始偷偷買，但股價看起來沒怎麼動 → 在突破之前就進場，等飆漲的時候 trailing 接力跑。」
+
+**⚠️ 重要警告**：S7 也是 regime-conditional，**只在多頭行情有效**。2022 熊市單獨測試結果是 **連虧 15 筆、勝率 18%、年化 -20%** — 災難級。**大盤一翻空頭請立刻手動關掉 S7 通知**。
+
+**勝率 52%**：跟 S6 一樣低勝率高 EV，要有心理準備。
+
+---
+
+## 🔍 AQS 累積品質分（給訊號加二次確認）
+
+AQS 不是進場策略，是給已經出現的訊號**打分數**（0-100），告訴你「這個累積看起來是真的、還是假的」。
+
+### 為什麼需要 AQS？
+
+光看「外資 60 日累計 +5M 張」這個數字其實**不夠**。同樣 +5M 可能是：
+
+- **健康累積**：法人耐心吃貨、每天小量、上漲日量增 → 主升段前夕
+- **假累積（派發給散戶）**：1-2 天大買製造突破假象、隔天反向賣 → 散戶接刀套牢
+
+AQS 就是用 5 個維度區分這兩種情境。
+
+### 五個維度（每個 0-20 分）
+
+1. **量價同向性** — 上漲日量大還是下跌日量大？上漲日量大 = 健康
+2. **法人買進連續性** — 60 天裡有多少天三大法人是淨買？> 60% 天數 = 持續累積
+3. **單日集中度（反向）** — 60 天的買進是平均分散還是集中在 1-2 天？分散 = 真累積、集中 = ETF 一次性事件
+4. **法人 vs 股價同向性**（最關鍵的紅旗在這） — 法人買且股價沒漲 = 最強；**法人賣但股價硬漲 = 紅旗（散戶接刀）**
+5. **回檔日量能** — 股票拉回時有沒有人在拋售？量縮 = 沒人賣（健康）
+
+### 比喻
+
+**S4/S5/S6/S7 是狙擊手扣板機，AQS 是狙擊鏡上的雷射測距**：板機決定何時開火、AQS 確認目標靠不靠譜。
+
+CLI 工具可以隨時查任何股票的 AQS：
 
 ```bash
-# Create virtualenv, install dependencies, copy .env template
+python -m analysis.aqs 2327      # 查國巨
+python -m analysis.aqs 2327 7769 6214  # 查多支
+```
+
+---
+
+## ⚡ S7 的 MA20 標籤
+
+S7 每年 70+ 筆訊號比較多，**並非每筆都會大贏**。透過失敗者分析發現一個微妙的訊號：**進場時股價已站上 MA20 的訊號，勝率較高（72% vs 整體 66%）**。
+
+在 Telegram 通知裡，**已站上 MA20 的訊號會加 ⚡ 標籤排在最前面**，方便你優先看。沒標籤的不是不能買，只是時機點稍微早一點（突破還沒成）。
+
+---
+
+## 📡 共用設計原則
+
+- **No look-ahead bias**：訊號在 T 日收盤後計算，T+1 開盤 + 滑價 0.1% 才進場
+- **嚴格大盤過濾**（S4 用）：0050 收 > MA60 + 收 > MA20 + MA60 升 + MA20 升，四條全到位才算多頭
+- **移動停利取代固定停利**：避免砍掉飆股的尾巴（S4 漲 20% 觸發、S6/S7 漲 80% 觸發）
+- **資料新鮮度保護**：daily_run 以 0050 的最新資料日為基準，任何股票資料落後就跳過
+- **TDCC 千張大戶週報**：每週自動更新一次散戶持股比例（給 S4 用）
+
+---
+
+## 🛠 技術棧
+
+| 層 | 工具 |
+|---|---|
+| 語言 | Python 3.11 |
+| 資料處理 | pandas, numpy |
+| 資料庫 | SQLite |
+| 資料來源 | FinMind API + TWSE/TPEx 官方 + TDCC 集保結算所 |
+| 排程 | GitHub Actions（每天 17:00 台灣時間） |
+| 推播 | Telegram Bot + Discord Webhook |
+| 測試 | pytest（47 個單元測試） |
+
+---
+
+## 🚀 安裝
+
+```bash
+# 一鍵建立虛擬環境 + 裝套件
 bash setup_env.sh
 source .venv/bin/activate
 ```
 
-Create a `.env` file (see `.env.example`):
+建立 `.env` 檔案（參考 `.env.example`）：
 
 ```bash
-FINMIND_TOKEN=<your token>        # required — free at finmindtrade.com
-TELEGRAM_TOKEN=<bot token>        # optional
-TELEGRAM_CHAT_ID=<chat id>        # optional
-DISCORD_WEBHOOK_URL=<webhook url> # optional
+FINMIND_TOKEN=<你的 token>    # 必填，免費申請 finmindtrade.com
+TELEGRAM_TOKEN=<bot token>     # 選填
+TELEGRAM_CHAT_ID=<chat id>     # 選填
+DISCORD_WEBHOOK_URL=<webhook>  # 選填
 ```
 
 ---
 
-## Usage
+## 📖 使用方式
 
 ```bash
-# One-time data bootstrap (~1–2 hours due to API rate limits)
-python main.py download           # price + institutional data
-python main.py download-revenue   # monthly revenue (separate step)
+# 一次性資料下載（首次跑，需 1-2 小時）
+python main.py download           # 價格 + 法人籌碼
+python main.py download-revenue   # 月營收（分開跑避免 rate limit）
 
-# Daily screening (also runs automatically via GitHub Actions)
+# 每日選股（GitHub Actions 自動跑、也可手動）
 python main.py screen
 
-# Backtesting
-python main.py backtest           # all strategies, train + test periods
-python main.py optimize <index>   # grid search on strategy N
+# 回測
+python main.py backtest           # 全策略 train + test
 
-# Benchmark
-python -m backtest.benchmark      # strategy vs 0050 ETF (t-test, alpha)
+# AQS 工具（單股查詢）
+python -m analysis.aqs <股票代號>
 
-# Tests
+# 測試
 pytest
 ```
 
 ---
 
-## GitHub Actions
+## 🤖 GitHub Actions
 
-| Workflow | Trigger | Job |
+| Workflow | 觸發 | 工作內容 |
 |---|---|---|
-| `daily_screen.yml` | Mon–Fri UTC 21:00 | Incremental update → screen → notify |
-| `bootstrap.yml` | Manual (`workflow_dispatch`) | Full historical download (resumable) |
+| `daily_screen.yml` | 週一至週五 台灣 17:00 | 增量更新 → 選股 → Telegram/Discord 推播 |
+| `bootstrap.yml` | 手動觸發 | 全市場歷史資料下載（斷點續跑） |
 | `ci.yml` | Push / PR | ruff lint + pytest |
 
-The DB is preserved across daily runs via `actions/cache`, keyed by workflow run number with a prefix fallback. On cache miss, the latest bootstrapped DB is downloaded from GitHub Releases.
+每日的 cache.db 在不同 run 之間用 `actions/cache` 保留，避免重複下載。
 
 ---
 
-## Key Engineering Details
+## ⚠️ 重要提醒
 
-- **No look-ahead bias.** Signals computed at close T; entries execute at T+1 open with slippage. Monthly revenue signals use T+11 as earliest availability date.
-- **Resumable downloads.** `fetch_log` table tracks `last_date` per stock per dataset. All download loops sort by stock ID so interruptions resume from the same position.
-- **Rate limiting.** `_finmind()` sleeps 6 s unconditionally after every API call. 402/403 responses write a permanent-skip sentinel; 429 triggers a 60 s backoff.
-- **Staleness guard.** Daily screen skips any stock whose latest price date lags behind 0050 (the TAIEX proxy), preventing stale data from generating signals.
-- **Cost accounting.** Backtest engine deducts buy fee (0.1425%), sell fee (0.1425%), securities transaction tax (0.3% TWSE/TPEx; 0.15% Emerging), and 0.1% slippage on entry.
+- **本 repo 是個人工程練習，不是投資建議**
+- 所有回測都是「歷史看起來如何」，**過去績效不保證未來表現**
+- S6、S7 是 regime-conditional 策略，**只在多頭行情有效**。大盤翻空頭請手動關掉這兩個策略的通知
+- 沒有任何策略保證賺錢，**請用閒錢操作、自己決定部位大小、自己承擔停損**
+- 系統設計分工：**訊號是系統的責任、抱不抱得住是投資者自己的責任**
