@@ -10,3 +10,6 @@ reports/
 .mcp.json
 # Added by code-review-graph
 .code-review-graph/
+
+# 個人持股設定（含進場價，敏感資料）
+portfolio.yml

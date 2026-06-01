@@ -1,0 +1,18 @@
+# 持股設定檔。複製這檔成 portfolio.yml（已 gitignore，不會被推上去）
+# 然後填入你的進場資訊。entry_price 是 cost basis，size_pct 用來計算總曝險
+
+holdings:
+  - stock_id: "8299"
+    name: "群聯"
+    entry_date: "2026-04-15"
+    entry_price: 1650.0      # 進場成本（含手續費 + 滑價）
+    size_pct: 8              # 佔總部位 %（可選，用來計算總曝險警示）
+    notes: "AI memory play"  # 你自己的備註（可選）
+
+  - stock_id: "6414"
+    name: "樺漢"
+    entry_date: "2026-04-01"
+    entry_price: 280.0
+    size_pct: 5
+
+  # 想加幾支加幾支
