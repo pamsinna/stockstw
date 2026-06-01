@@ -102,6 +102,7 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
     long_df    = signals.get("long",    pd.DataFrame())
     revenue_df = signals.get("revenue", pd.DataFrame())
     growth_df  = signals.get("growth",  pd.DataFrame())
+    accum_df   = signals.get("accum",   pd.DataFrame())
 
     # 超過 10 支時按市值代理排序（收盤價 × 成交量 ≈ 當日成交金額）
     # vol_ratio 是策略一的條件，對策略四的 alpha 來源無關；
@@ -231,6 +232,38 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
                 f"{aqs_line}"
             )
         messages.append("\n".join(g_lines))
+
+    # ── 策略七：累積前夕（狙擊手型，每年 ~5 筆訊號）──────────────────────
+    if not accum_df.empty:
+        if "f_60d" in accum_df.columns and "t_60d" in accum_df.columns:
+            accum_df = accum_df.assign(
+                _inst60=accum_df["f_60d"].fillna(0) + accum_df["t_60d"].fillna(0)
+            ).sort_values("_inst60", ascending=False).drop(columns="_inst60")
+        a_lines = [
+            f"🎯 <b>策略七：累積前夕</b>  共 {len(accum_df)} 支",
+            "停損 -20%（寬）  trailing +80%/-15%  最長 180 天",
+            "<i>📡 抓「法人偷收貨、股價還沒反映」的早中期累積</i>",
+            "<i>⚠️ 勝率 ~44%，連虧 3-4 筆是正常；部位建議 S4 的 1/3</i>\n",
+        ]
+        for _, row in accum_df.head(MAX_POSITIONS).iterrows():
+            emoji = MARKET_EMOJI.get(row.get("market", "TWSE"), "⚪")
+            sid   = row["stock_id"]
+            close = row.get("close", "—")
+            f60   = row.get("f_60d", float("nan"))
+            t60   = row.get("t_60d", float("nan"))
+            inst60 = (0 if pd.isna(f60) else f60) + (0 if pd.isna(t60) else t60)
+            inst_str = f"+{int(inst60//1000)}K" if inst60 > 0 else f"{int(inst60//1000)}K"
+            aqs = row.get("aqs_score", float("nan"))
+            stage = row.get("aqs_stage", "")
+            verdict = row.get("aqs_verdict", "")
+            aqs_line = (f"\n  AQS {aqs:.0f}  {stage}  {verdict}"
+                        if not pd.isna(aqs) else "")
+            name = names.get(sid, "")
+            a_lines.append(
+                f"{emoji} <b>{sid} {name}</b>  ${close}  法人60日{inst_str}"
+                f"{aqs_line}"
+            )
+        messages.append("\n".join(a_lines))
 
     # ── 執行紀律提醒 ──────────────────────────────────────────────────────
     messages.append(

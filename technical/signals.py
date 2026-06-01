@@ -451,6 +451,103 @@ def signal_growth_breakout(df: pd.DataFrame,
     return _apply_market_filter(df, "signal_growth", market_filter)
 
 
+# ─── 策略 S7：累積前夕（狙擊手型）────────────────────────────────────────────
+# 抓「法人偷收貨、股價還沒反映」的早中期累積階段。
+# 訊號量少（每年 ~5 筆）、勝率中等（~44%）、但贏家可放 200-500 天賺 +60% ~ +200%。
+
+def signal_accumulation_eve(df: pd.DataFrame,
+                             inst_df: pd.DataFrame | None = None,
+                             market_filter: pd.Series | None = None,
+                             inst_threshold: int = 3_000_000,
+                             price_chg_low: float = -5.0,
+                             price_chg_high: float = 25.0,
+                             pos_max: float = 0.75,
+                             aqs_min: float = 70.0) -> pd.DataFrame:
+    """
+    S7 累積前夕：在主升段啟動「之前」就埋伏，等突破時 trailing 接力跑
+
+    進場條件（全部滿足）：
+      1. 外資 + 投信 60 日累計 ≥ inst_threshold 股
+      2. 股價 60 日漲幅 in [price_chg_low, price_chg_high]
+         （-5% ~ +25%：法人在累積但股價還沒被 price-in）
+      3. 收盤位置 < pos_max（離 60 日高還有空間，未突破）
+      4. AQS 估計 ≥ aqs_min（dim1+dim2+18+dim4 ≥ 70）
+      5. AQS dim4 ≥ 5（法人 vs 股價同向，無紅旗）
+      6. 大盤 loose 多頭
+
+    出場（在 STRATEGIES 設定）：
+      SL -20%（寬：給累積期足夠空間，避免被正常波動洗出）
+      max_hold 180 天
+      trailing trigger +80% / trail -15%（突破後讓贏家跑）
+
+    為什麼 SL 要寬：累積階段股價自然會在 ±10% 區間波動數個月。
+    若 SL 設 -10%，正常洗盤就會觸發停損；改 -20% 後 IS Sharpe
+    從 6.18 翻倍到 13.29、MaxDD 從 -16% 降到 -2.52%。
+    """
+    df = add_all(df).copy()
+    if inst_df is not None and not inst_df.empty:
+        df = merge_institutional(df, inst_df)
+    df["signal_accum"] = False
+    if "foreign_" not in df.columns:
+        return _apply_market_filter(df, "signal_accum", market_filter)
+
+    import numpy as np
+    df = df.sort_values("date").reset_index(drop=True)
+
+    # 法人 60 日累計（外資 + 投信）
+    inst_net = df["foreign_"].fillna(0) + df["trust"].fillna(0) if "trust" in df.columns else df["foreign_"].fillna(0)
+    df["accum_inst_60d"] = inst_net.rolling(60, min_periods=30).sum()
+
+    # 股價 60 日漲幅
+    df["accum_price_chg_60d"] = (df["close"] / df["close"].shift(60) - 1) * 100
+
+    # 位置（60 日區間）
+    high60 = df["close"].rolling(60, min_periods=60).max()
+    low60  = df["close"].rolling(60, min_periods=60).min()
+    df["accum_pos"] = (df["close"] - low60) / (high60 - low60)
+
+    # AQS 估計：dim1 + dim2 + 18(中性) + dim4
+    price_chg_d = df["close"].diff()
+    up_vol = np.where(price_chg_d > 0, df["volume"], 0)
+    dn_vol = np.where(price_chg_d < 0, df["volume"], 0)
+    up_count = (price_chg_d > 0).astype(int)
+    dn_count = (price_chg_d < 0).astype(int)
+    up_vol_avg = pd.Series(up_vol, index=df.index).rolling(60).sum() / up_count.rolling(60).sum().replace(0, np.nan)
+    dn_vol_avg = pd.Series(dn_vol, index=df.index).rolling(60).sum() / dn_count.rolling(60).sum().replace(0, np.nan)
+    vp_ratio = up_vol_avg / dn_vol_avg
+    dim1 = (vp_ratio - 0.5) * 20
+    dim1 = dim1.clip(0, 20)
+
+    inst_buy = (inst_net > 0).astype(int)
+    dim2 = inst_buy.rolling(60, min_periods=30).mean() * 20
+
+    # dim4: 法人 vs 股價同向
+    inst_total = df["accum_inst_60d"]
+    price_chg = df["accum_price_chg_60d"]
+    dim4 = pd.Series(0.0, index=df.index)
+    dim4[(inst_total > 0) & (price_chg.between(-20, 5))] = 20
+    dim4[(inst_total > 0) & (price_chg.between(5, 40, inclusive="right"))] = 15
+    dim4[(inst_total > 0) & (price_chg > 40)] = 5
+    dim4[(inst_total <= 0) & (price_chg > 30)] = -20
+    dim4[(inst_total <= 0) & (price_chg.between(0, 30))] = -10
+    df["accum_aqs"] = (dim1 + dim2 + 18 + dim4).clip(0, 100)
+    df["accum_dim4"] = dim4
+
+    df["signal_accum"] = ((df["accum_inst_60d"] >= inst_threshold) &
+                          (df["accum_price_chg_60d"].between(price_chg_low, price_chg_high)) &
+                          (df["accum_pos"] < pos_max) &
+                          (df["accum_aqs"] >= aqs_min) &
+                          (dim4 >= 5))
+
+    # 把 f_60d / t_60d 加進去（給通知用）
+    if "f_60d" not in df.columns:
+        df["f_60d"] = df["foreign_"].rolling(60, min_periods=30).sum() if "foreign_" in df.columns else 0
+    if "t_60d" not in df.columns:
+        df["t_60d"] = df["trust"].rolling(60, min_periods=30).sum() if "trust" in df.columns else 0
+
+    return _apply_market_filter(df, "signal_accum", market_filter)
+
+
 # ─── 全策略清單（供批次回測用）────────────────────────────────────────────────
 
 STRATEGIES = [
@@ -494,5 +591,32 @@ STRATEGIES = [
         # ⚠️ regime-conditional: 在 AI bull (2023-25) Sharpe 12.8、
         # 無 AI bull (2019-22) Sharpe 2.6。視為「順勢加強」而非全週期 core。
         # 勝率 ~38% — 連虧 5-6 筆是正常，部位應比 S4 小。
+    },
+    {
+        "name": "累積前夕",
+        "signal_fn": signal_accumulation_eve,
+        "signal_col": "signal_accum",
+        "timeframe": "accum",
+        "default_tp": 0.30, "default_sl": 0.20, "default_hold": 180,
+        "trail_trigger": 0.80,
+        "trail_pct": 0.15,
+        "strict_market": False,
+        "needs_fundamental": True,
+        "inst_threshold": 2_000_000,
+        "aqs_min": 60.0,
+        # AQS 門檻 60（激進版，AI bull 加強型）
+        # 🚨🚨🚨 REGIME-CONDITIONAL 警告 🚨🚨🚨
+        #
+        # OOS 2023-2025 (AI bull): tr=222, Sh 27.55, ann +56%, DD -0.87%
+        # IS  2019-2022 (含 COVID + 升息熊): tr=142, Sh 7.89, ann +14%, IS DD -4.80%
+        # 2022 單一熊市年: tr=61, 勝率 18%, ann -20%, Sharpe -18, 連敗 15 筆
+        #
+        # 用戶明確選擇激進版 (option C)：
+        #   1. 信任 AI bull regime 會持續 1-2 年
+        #   2. 承諾大盤翻空時手動關閉 S7 通知
+        #   3. 接受 OOS 訊號 ~70 筆/年 的高密度
+        #
+        # ⚠️ 若大盤 0050 跌破 MA60 持續 2 週以上 → 強烈建議在 telegram bot
+        #    手動 mute S7 通知，避免重演 2022 連敗 15 筆的慘況。
     },
 ]

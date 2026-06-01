@@ -27,6 +27,7 @@ from technical.signals import (
     signal_longterm_quality_entry,
     signal_revenue_momentum,
     signal_growth_breakout,
+    signal_accumulation_eve,
     STRATEGIES,
 )
 from analysis.aqs import compute_aqs
@@ -43,6 +44,10 @@ _S4_RETAIL_MAX = _S4.get("retail_max_pct")
 _S6 = next(s for s in STRATEGIES if s["name"] == "高成長突破")
 _S6_INST_THR = _S6.get("inst_threshold", 0)
 _S6_REV_MIN = _S6.get("rev_growth_min", 10.0)
+
+_S7 = next(s for s in STRATEGIES if s["name"] == "累積前夕")
+_S7_INST_THR = _S7.get("inst_threshold", 3_000_000)
+_S7_AQS_MIN = _S7.get("aqs_min", 70.0)
 
 
 def incremental_update(universe: pd.DataFrame) -> None:
@@ -129,7 +134,7 @@ def screen_today(universe: pd.DataFrame,
     回傳 {timeframe: DataFrame of signals today}
     timeframe: "short", "swing", "long"
     """
-    results: dict[str, list] = {"long": [], "revenue": [], "growth": []}
+    results: dict[str, list] = {"long": [], "revenue": [], "growth": [], "accum": []}
     market_map = dict(zip(universe["stock_id"], universe["market"]))
 
     # 大盤過濾：今天是否多頭趨勢
@@ -217,6 +222,14 @@ def screen_today(universe: pd.DataFrame,
                 if bool(df_g.iloc[-1].get("signal_growth", False)):
                     results["growth"].append(_summary_row(sid, market, df_g, "growth"))
 
+            # 策略七：累積前夕（需基本面 pass，loose market filter）
+            if sid in fund_ok:
+                df_a = signal_accumulation_eve(price, inst_arg,
+                    market_filter=mf, inst_threshold=_S7_INST_THR,
+                    aqs_min=_S7_AQS_MIN)
+                if bool(df_a.iloc[-1].get("signal_accum", False)):
+                    results["accum"].append(_summary_row(sid, market, df_a, "accum"))
+
         except Exception as e:
             cls = type(e).__name__
             signal_errors[cls] = signal_errors.get(cls, 0) + 1
@@ -228,8 +241,8 @@ def screen_today(universe: pd.DataFrame,
         logger.warning(f"Signal computation failed for {total} stocks ({breakdown})")
 
     # 對每個訊號補上 AQS（累積品質分）+ stage + verdict
-    # 只給 S4 (long) 和 S6 (growth) 加；S5 月營收動能本質不同不適用
-    for tf in ("long", "growth"):
+    # S4 (long), S6 (growth), S7 (accum) 都加 AQS 二次確認
+    for tf in ("long", "growth", "accum"):
         for row in results[tf]:
             sid = row["stock_id"]
             try:
