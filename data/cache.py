@@ -111,6 +111,49 @@ def init_db() -> None:
         except sqlite3.OperationalError:
             pass  # column already exists
     logger.info(f"DB initialised at {DB_PATH}")
+    _cleanup_mislabeled_skip()
+
+
+def _cleanup_mislabeled_skip() -> None:
+    """每次啟動時清理被誤標 9999-12-31 的 fetch_log 記錄。
+
+    歷史背景：2026-04-30 ~ 05-01 期間 FinMind 可能系統異常單日大量回 403，
+    舊的 mark_fetch_skip 把 1063 支股票（含台積電、南亞科、樺漢、聯發科）
+    永久標記為跳過，導致它們的 5 月-6 月資料完全沒抓到，所有訊號與健診失準。
+
+    清理規則：
+    - 若資料表（daily_price 等）裡仍有該股票歷史資料 → 把 fetch_log 改回
+      最後一筆實際資料日，讓 incremental_update 從那天起續抓
+    - 若資料表完全沒資料 → 刪除 fetch_log entry，讓系統當作沒抓過
+    """
+    table_map = {
+        "price": "daily_price",
+        "institutional": "institutional",
+        "revenue": "monthly_revenue",
+        "per": "daily_per",
+    }
+    with _conn() as con:
+        total_fixed = 0
+        total_deleted = 0
+        for dataset, table in table_map.items():
+            cur = con.execute(
+                f"UPDATE fetch_log SET last_date = "
+                f"(SELECT MAX(date) FROM {table} WHERE {table}.stock_id=fetch_log.stock_id) "
+                f"WHERE dataset=? AND last_date='9999-12-31' "
+                f"AND EXISTS (SELECT 1 FROM {table} WHERE {table}.stock_id=fetch_log.stock_id)",
+                (dataset,)
+            )
+            total_fixed += cur.rowcount
+            cur = con.execute(
+                "DELETE FROM fetch_log WHERE dataset=? AND last_date='9999-12-31'",
+                (dataset,)
+            )
+            total_deleted += cur.rowcount
+        if total_fixed or total_deleted:
+            logger.warning(
+                f"Cleaned mislabeled 9999 fetch_log: {total_fixed} reset to last actual date, "
+                f"{total_deleted} entries deleted (will refetch from scratch)"
+            )
 
 
 # ─── stock_universe ───────────────────────────────────────────────────────────
