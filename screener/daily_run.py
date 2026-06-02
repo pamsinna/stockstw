@@ -52,15 +52,16 @@ _S7_AQS_MIN = _S7.get("aqs_min", 70.0)
 
 def incremental_update(universe: pd.DataFrame) -> None:
     """
-    只更新 DB 中已有歷史資料的股票 + 0050（大盤代理）
-    新股第一次下載需執行 download 模式
+    更新所有 universe 內的股票：
+    - 已有 fetch_log entry 的 → 從 last_date 續抓
+    - 沒 entry 的（新股 / 被清掉的）→ 從 DATA_START 全量抓
+    - 加 0050（大盤代理）
     """
     today_str = datetime.now(_TZ).strftime("%Y-%m-%d")
 
     all_stocks = universe["stock_id"].tolist()
-    stocks_to_update = [
-        sid for sid in all_stocks if last_price_date(sid) is not None
-    ]
+    # 全 universe 都要 update（包含新股 last_price_date=None）
+    stocks_to_update = list(all_stocks)
     if TAIEX_PROXY not in stocks_to_update:
         stocks_to_update.insert(0, TAIEX_PROXY)
 
