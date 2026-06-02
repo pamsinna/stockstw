@@ -268,12 +268,41 @@ _PROTECTED_STOCKS = {"0050"}  # 大盤代理：永遠不可標記為永久跳過
 
 
 def mark_fetch_skip(stock_id: str, dataset: str) -> None:
-    """記錄此股票／資料集為永久跳過（402/403）。
-    fetch_log 日期設 9999-12-31，下次 last_X_date() 回傳值 >= 任何昨天，不再重試。
-    0050 是市場過濾與 staleness guard 的錨點，永遠不可標記為跳過。"""
+    """記錄此股票／資料集為永久跳過（403）。
+
+    安全防護：
+    1. 0050 是市場過濾錨點，永不可跳過
+    2. 若該股票最近 30 天內有過實際資料（不是真的下市），
+       拒絕永久標記—很可能是 FinMind 偶發 403，不是真下市
+
+    這個防護是 2026/04 - 05 期間誤標 1063 支股票（包含台積電、南亞科、
+    樺漢等）為永久跳過後加上的：當時可能 FinMind 系統異常單日大量回 403，
+    舊代碼直接全標 9999-12-31 導致這些股票被永久排除、不再更新。
+    """
     if stock_id in _PROTECTED_STOCKS:
         logger.warning(f"Refusing to mark_fetch_skip protected stock {stock_id}/{dataset}")
         return
+
+    # 檢查該股票最近是否仍有實際資料 — 若是，視為偶發 403，拒絕永久標記
+    table_map = {"price": "daily_price", "institutional": "institutional",
+                 "revenue": "monthly_revenue", "per": "daily_per",
+                 "fin_stmt": "financial", "fin_bs": "financial", "fin_cf": "financial"}
+    table = table_map.get(dataset)
+    if table:
+        from datetime import date, timedelta
+        cutoff = (date.today() - timedelta(days=30)).isoformat()
+        with _conn() as con:
+            row = con.execute(
+                f"SELECT MAX(date) FROM {table} WHERE stock_id=?",
+                (stock_id,)
+            ).fetchone()
+        if row and row[0] and row[0] >= cutoff:
+            logger.warning(
+                f"Refusing mark_fetch_skip {stock_id}/{dataset}: "
+                f"recent activity until {row[0]}, suspect transient 403 not delisting"
+            )
+            return
+
     with _conn() as con:
         con.execute(
             "INSERT OR REPLACE INTO fetch_log VALUES (?,?,?)",
