@@ -21,13 +21,22 @@ fi
 mkdir -p data
 
 echo "Downloading $TAG from GitHub Release..."
+# 先清舊 .gz（如果存在，避免 gh download 寫成 .gz.gz 或 gzip 找不到）
+rm -f data/cache.db.gz
 gh release download "$TAG" --repo "$REPO" \
     --pattern 'cache.db.gz' \
     --output data/cache.db.gz \
     --clobber
 
+# 驗證下載
+if [ ! -s data/cache.db.gz ]; then
+    echo "❌ 下載失敗（檔案不存在或為空）。檢查網路或 gh auth status"
+    exit 1
+fi
+echo "  下載完成: $(du -sh data/cache.db.gz | cut -f1)"
+
 echo "Decompressing..."
-gzip -d -f data/cache.db.gz
+gunzip -f data/cache.db.gz
 
 echo ""
 echo "✅ DB synced from $TAG"
