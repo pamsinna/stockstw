@@ -8,6 +8,13 @@ on:
     - cron: "0 9 * * 0-4"
   workflow_dispatch:  # 允許手動觸發
 
+# 同時只允許 1 個 run（包含 schedule + manual + auto-retry）：
+# 新 run 進來時若已有在跑，會 queue 等待而非並行，避免 FinMind token 配額對撞。
+# cancel-in-progress: false → 已在跑的不被砍掉，新的 queue 等
+concurrency:
+  group: daily-stock-screen
+  cancel-in-progress: false
+
 jobs:
   screen:
     runs-on: ubuntu-latest
