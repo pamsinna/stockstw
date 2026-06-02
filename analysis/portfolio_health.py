@@ -85,18 +85,20 @@ def check_one(stock_id: str, entry_date: str | None, entry_price: float) -> dict
     # AQS
     aqs = compute_aqs(stock_id) or {}
 
-    # 法人近 5 / 10 / 30 日
+    # 法人近 1 / 3 / 5 / 10 / 30 日
     if not inst_df.empty:
         inst_df = inst_df.sort_values("date")
         inst_df["all"] = (inst_df["foreign_"].fillna(0) +
                           inst_df["trust"].fillna(0) +
                           inst_df["dealer"].fillna(0))
+        inst_1d = int(inst_df.tail(1)["all"].sum())
+        inst_3d = int(inst_df.tail(3)["all"].sum())
         inst_5d = int(inst_df.tail(5)["all"].sum())
         inst_10d = int(inst_df.tail(10)["all"].sum())
         inst_30d = int(inst_df.tail(30)["all"].sum())
         f_5d = int(inst_df.tail(5)["foreign_"].sum())
     else:
-        inst_5d = inst_10d = inst_30d = f_5d = 0
+        inst_1d = inst_3d = inst_5d = inst_10d = inst_30d = f_5d = 0
 
     # 趨勢面：跌破 MA60？
     if len(price_df) >= 60:
@@ -157,6 +159,17 @@ def check_one(stock_id: str, entry_date: str | None, entry_price: float) -> dict
         if severity == "✅ 繼續持有":
             severity = "⚠️ 觀察減碼"
 
+    # 反轉跡象：近期轉買但 5d 或 10d 仍負（避免誤判剛開始買的）
+    # 條件：近 1 日強買 (>200K) AND 近 3 日合計仍正 AND (5d 或 10d 為負)
+    if (inst_1d > 200_000 and inst_3d > 0 and (inst_5d < 0 or inst_10d < 0)):
+        actions.append(
+            f"🔄 反轉跡象：近 1 日 +{inst_1d:,} / 近 3 日 +{inst_3d:,}，"
+            f"但 5d {inst_5d:+,} / 10d {inst_10d:+,} — 可能剛轉買，多觀察 2-3 日"
+        )
+        # 若原本因為 5d 賣超被列警告，降一級
+        if severity in ("🚨 立即減碼", "⚠️ 觀察"):
+            severity = "⚠️ 觀察減碼"  # 降為中度警告
+
     return {
         "stock_id": stock_id,
         "current": current,
@@ -170,6 +183,8 @@ def check_one(stock_id: str, entry_date: str | None, entry_price: float) -> dict
         "aqs_score": aqs_score,
         "aqs_stage": aqs.get("stage", ""),
         "aqs_verdict": aqs_verdict,
+        "inst_1d": inst_1d,
+        "inst_3d": inst_3d,
         "inst_5d": inst_5d,
         "inst_10d": inst_10d,
         "inst_30d": inst_30d,
@@ -214,7 +229,10 @@ def format_report(results: list[dict], name_map: dict) -> str:
             if r.get("aqs_stage"):
                 head += f" {r['aqs_stage']}"
             lines.append(head)
-            lines.append(f"    法人 5d {r['inst_5d']:+,}  10d {r['inst_10d']:+,}  30d {r['inst_30d']:+,}")
+            lines.append(
+                f"    法人 1d {r['inst_1d']:+,}  3d {r['inst_3d']:+,}  "
+                f"5d {r['inst_5d']:+,}  10d {r['inst_10d']:+,}  30d {r['inst_30d']:+,}"
+            )
             if r["actions"]:
                 for a in r["actions"]:
                     lines.append(f"    └ {a}")
