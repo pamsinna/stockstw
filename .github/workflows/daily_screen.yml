@@ -145,16 +145,12 @@ jobs:
 
           echo "DB snapshot uploaded to release tag: $TAG"
 
-      # 若 universe 內仍有大量 stale 股票（首次抓 / 卡舊日期），自動觸發下一輪
-      # 安全閥：限 5 次連續 backfill；超過則停止，避免無限迴圈
-      - name: Auto-retry if backfill incomplete
+      # 報告 stale 數（純資訊，不嘗試觸發下一輪 — GITHUB_TOKEN 無權限）
+      # 如要 backfill 連跑：本地執行 bash scripts/backfill_loop.sh
+      - name: Report stale count
         if: success()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -e
-          # 計算 stale 數：universe 內 fetch_log price 缺 entry 或 last_date 早於 7 天前
-          STALE=$(python3 -c "
+          python3 -c "
           import sqlite3
           from datetime import date, timedelta
           con = sqlite3.connect('data/cache.db')
@@ -167,26 +163,8 @@ jobs:
                     AND f.last_date >= ? AND f.last_date < '9999-01-01'
               )
           ''', (cutoff,)).fetchone()[0]
-          print(n)
-          ")
-
-          THRESHOLD=50
-          MAX_RETRY=5
-
-          # 數最近 60 分鐘內已連續觸發幾次（用 created_at 過濾，避免無限迴圈）
-          RECENT=$(gh api "repos/pamsinna/stockstw/actions/workflows/daily_screen.yml/runs?event=workflow_dispatch&per_page=20" \
-            --jq "[.workflow_runs[] | select(.created_at > (now - 3600 | strftime(\"%Y-%m-%dT%H:%M:%SZ\")))] | length" 2>/dev/null || echo "0")
-
-          echo "Stale stocks: $STALE  (threshold: $THRESHOLD)"
-          echo "Recent dispatched runs (60min): $RECENT  (max: $MAX_RETRY)"
-
-          if [ "$STALE" -le "$THRESHOLD" ]; then
-            echo "✅ Backfill complete enough ($STALE ≤ $THRESHOLD). 不觸發下一輪。"
-          elif [ "$RECENT" -ge "$MAX_RETRY" ]; then
-            echo "⚠️ 達到連續 retry 上限 ($MAX_RETRY 次/小時)，暫停以避免無限迴圈。"
-            echo "    請等下次 cron 或手動觸發。"
-          else
-            echo "🔁 仍有 $STALE 支 stale，觸發下一輪 backfill..."
-            gh workflow run "Daily Stock Screen" --repo pamsinna/stockstw
-            echo "✓ 已觸發新 run"
-          fi
+          if n > 50:
+              print(f'⚠️ Universe stale: {n} 支。本地執行 bash scripts/backfill_loop.sh 連跑補抓。')
+          else:
+              print(f'✅ Universe stale: {n} 支（已補齊）')
+          "
