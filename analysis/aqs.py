@@ -11,9 +11,9 @@ AQS (Accumulation Quality Score) — 累積品質分
   4. 法人 vs 股價同向：法人賣但股價漲 = 紅旗（散戶接刀）
   5. 回檔日量能：回檔時量縮（惜售好）vs 量增（賣壓）
 
-Stage 標籤獨立於 AQS：
-  - 早期累積（pos<40%, RSI<55）
-  - 中期（pos<70%, RSI<65, BB%<85）
+Stage 標籤（位置 + 籌碼方向）：
+  - 早期累積 / 派發落底（pos<40%, RSI<55；視 inst_60d 正負分流）
+  - 中期 / 派發中段（pos<70%, RSI<65, BB%<85；視 inst_60d 正負分流）
   - 中末段（pos 70-85% 或 BB% 85-100%）
   - 末段（pos>85% 或 RSI>=70 或 BB%>=100）
 
@@ -98,9 +98,9 @@ def compute_aqs(stock_id: str, lookback: int = 60) -> dict | None:
     rsi = float(last_row.get("rsi", 50))
     bb = float(last_row.get("bb_pct", 0.5))
     if pos < 0.4 and rsi < 55:
-        stage = "🟢 早期累積"
+        stage = "🟢 早期累積" if inst_total > 0 else "⚫ 派發落底"
     elif pos < 0.7 and rsi < 65 and bb < 0.85:
-        stage = "🟡 中期"
+        stage = "🟡 中期" if inst_total > 0 else "⚫ 派發中段"
     elif pos >= 0.85 or rsi >= 70 or bb >= 1.0:
         stage = "🔴 末段"
     else:
