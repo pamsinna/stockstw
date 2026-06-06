@@ -5,7 +5,8 @@ on:
     # 台灣時間約 17:00（UTC 09:00），盤後 3.5 小時開始跑、約 18:30 結束
     # 三大法人約 17:00 後公布，FinMind 同步約再延 30min；運行末段抓的
     # 股票應已有當日法人資料，f_60d 完整。
-    - cron: "0 9 * * 0-4"
+    # cron 的 day-of-week: 0=Sun, 1=Mon ... 5=Fri, 6=Sat → 1-5 = 週一到週五
+    - cron: "0 9 * * 1-5"
   workflow_dispatch:  # 允許手動觸發
 
 # 同時只允許 1 個 run（包含 schedule + manual + auto-retry）：
