@@ -146,26 +146,16 @@ jobs:
 
           echo "DB snapshot uploaded to release tag: $TAG"
 
-      # 報告 stale 數（純資訊，不嘗試觸發下一輪 — GITHUB_TOKEN 無權限）
-      # 如要 backfill 連跑：本地執行 bash scripts/backfill_loop.sh
-      - name: Report stale count
-        if: success()
+      # 系統 audit：找出資料缺漏 / 9999 殘留 / 衍生資料源 stale 等
+      # 「資料沒讀到 → 訊號沒發」的隱形失敗點。
+      # 有 critical 或 warning 時自動推 Telegram 摘要。
+      - name: System audit (post-screen)
+        if: always()
+        env:
+          TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          python3 -c "
-          import sqlite3
-          from datetime import date, timedelta
-          con = sqlite3.connect('data/cache.db')
-          cutoff = (date.today() - timedelta(days=7)).isoformat()
-          n = con.execute('''
-              SELECT COUNT(*) FROM stock_universe u
-              WHERE NOT EXISTS (
-                  SELECT 1 FROM fetch_log f
-                  WHERE f.stock_id = u.stock_id AND f.dataset = 'price'
-                    AND f.last_date >= ? AND f.last_date < '9999-01-01'
-              )
-          ''', (cutoff,)).fetchone()[0]
-          if n > 50:
-              print(f'⚠️ Universe stale: {n} 支。本地執行 bash scripts/backfill_loop.sh 連跑補抓。')
-          else:
-              print(f'✅ Universe stale: {n} 支（已補齊）')
-          "
+          # 印詳細報告到 log（exit code 1 也讓 workflow 繼續）
+          python scripts/system_audit.py || true
+          # 推 Telegram 摘要（無 finding 時不發）
+          python scripts/system_audit.py --telegram || true
