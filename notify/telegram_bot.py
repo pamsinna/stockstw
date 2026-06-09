@@ -103,6 +103,12 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
     revenue_df = signals.get("revenue", pd.DataFrame())
     growth_df  = signals.get("growth",  pd.DataFrame())
     accum_df   = signals.get("accum",   pd.DataFrame())
+    combo_df   = signals.get("combo_47", pd.DataFrame())
+    meta_df    = signals.get("_meta",   pd.DataFrame())
+    regime_label = (meta_df.iloc[0]["regime_label"]
+                    if not meta_df.empty and "regime_label" in meta_df.columns else "")
+    regime_ret = (meta_df.iloc[0]["regime_60d_return"]
+                  if not meta_df.empty and "regime_60d_return" in meta_df.columns else 0.0)
 
     # 超過 10 支時按市值代理排序（收盤價 × 成交量 ≈ 當日成交金額）
     # vol_ratio 是策略一的條件，對策略四的 alpha 來源無關；
@@ -116,11 +122,43 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
             long_df = long_df.sample(frac=1, random_state=42)  # 隨機（統計最乾淨）
 
     # ── Header ────────────────────────────────────────────────────────────
+    regime_line = (f"\n大盤 regime：{regime_label}（0050 60日 {regime_ret*100:+.1f}%）"
+                   if regime_label else "")
     header = (
         f"📊 <b>台股選股報告 {date}</b>\n"
         f"主力訊號（中長線）：{len(long_df)} 支"
+        f"{regime_line}"
     )
     messages.append(header)
+
+    # ── 🎯 高信心：S4 ∩ S7 兩月內交集 ─────────────────────────────────────
+    if not combo_df.empty:
+        c_lines = [
+            f"🎯 <b>高信心進場 (S4 ∩ S7)</b>  共 {len(combo_df)} 支",
+            "<i>回測 60 日勝率 60.4%（vs S7 only 56.9%），中位 +5.46%</i>\n",
+        ]
+        for _, row in combo_df.head(MAX_POSITIONS).iterrows():
+            emoji = MARKET_EMOJI.get(row.get("market", "TWSE"), "⚪")
+            sid   = row["stock_id"]
+            close = row.get("close", "—")
+            f60   = row.get("f_60d", float("nan"))
+            t60   = row.get("t_60d", float("nan"))
+            inst60 = (0 if pd.isna(f60) else f60) + (0 if pd.isna(t60) else t60)
+            inst_str = f"+{int(inst60//1000)}K" if inst60 > 0 else f"{int(inst60//1000)}K"
+            name = names.get(sid, "")
+            s4_today = row.get("s4_today", False)
+            s7_today = row.get("s7_today", False)
+            trigger = "今日 S4+S7" if s4_today and s7_today else ("今日 S4" if s4_today else "今日 S7")
+            aqs = row.get("aqs_score", float("nan"))
+            stage = row.get("aqs_stage", "")
+            verdict = row.get("aqs_verdict", "")
+            aqs_line = (f"\n  AQS {aqs:.0f}  {stage}  {verdict}"
+                        if not pd.isna(aqs) else "")
+            c_lines.append(
+                f"{emoji} <b>{sid} {name}</b>  ${close}  {trigger}  法人60日{inst_str}"
+                f"{aqs_line}"
+            )
+        messages.append("\n".join(c_lines))
 
     # ── 近期績效監控 ──────────────────────────────────────────────────────
     recent = _load_recent_log(20)
@@ -172,9 +210,16 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
 
     # ── 策略五：月營收動能（每月 10 日後才有，其他日子不顯示）──────────────
     if not revenue_df.empty:
+        # Regime-aware：2026 多頭 S5 80% 勝率 +42%；空頭時 0%；以 0050 60d 報酬為閘
+        if "多頭" in regime_label:
+            s5_priority = "🔥 <b>主力升級</b>（2026 多頭，回測 80% 勝率 +42%）"
+        elif "空頭" in regime_label:
+            s5_priority = "🥶 <b>建議暫停或減半</b>（空頭環境 S5 失效）"
+        else:
+            s5_priority = "🟡 中性環境，正常部位"
         rev_lines = [
             f"📊 <b>策略五：月營收動能</b>  共 {len(revenue_df)} 支",
-            "停利 +40%  停損 -12%  最長 120 天",
+            f"停利 +40%  停損 -12%  最長 120 天   {s5_priority}",
             "<i>今為公布後第一交易日，基本面轉折訊號</i>\n",
         ]
         for _, row in revenue_df.head(MAX_POSITIONS).iterrows():

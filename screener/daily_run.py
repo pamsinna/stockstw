@@ -17,10 +17,11 @@ from data.cache import (
     save_prices, save_institutional, last_price_date, last_institutional_date,
     last_revenue_date, mark_fetch_skip, load_shareholding_latest,
     save_shareholding, last_shareholding_date,
+    save_futures_inst, last_futures_inst_date,
 )
 from data.universe import build_universe
 from data.fetcher import (fetch_price, fetch_institutional, fetch_monthly_revenue,
-                          fetch_tdcc_shareholding)
+                          fetch_tdcc_shareholding, fetch_futures_inst)
 from backtest.run_backtest import build_market_filter, _normalize_and_save_revenue
 from fundamental.quality_filter import batch_fundamentals
 from technical.signals import (
@@ -36,6 +37,9 @@ logger = logging.getLogger(__name__)
 
 _TZ = ZoneInfo("Asia/Taipei")
 TAIEX_PROXY = "0050"
+# Regime gauge 用的衍生資料源（非 universe 內的個股）
+_AUX_PRICE_IDS = ["0056"]              # 高股息 ETF（防禦輪動指標）
+_AUX_FUTURES_IDS = ["TX"]              # 台指期（外資未平倉指標）
 
 _S4 = next(s for s in STRATEGIES if s["name"] == "中長線_品質股低接")
 _S4_INST_THR = _S4.get("inst_threshold", 0)
@@ -113,6 +117,26 @@ def incremental_update(universe: pd.DataFrame) -> None:
                 elif not rev.empty:
                     _normalize_and_save_revenue(sid, rev)
 
+    # Regime gauge 用的衍生資料（0056 + TX 期貨）— sync_db 會覆蓋 local，
+    # 因此每次 incremental_update 都要重新補齊
+    for sid in _AUX_PRICE_IDS:
+        last = last_price_date(sid) or DATA_START
+        if last < today_str:
+            df = fetch_price(sid, last)
+            if df is None:
+                mark_fetch_skip(sid, "price")
+            elif not df.empty:
+                save_prices(sid, df)
+                logger.info(f"Aux price {sid}: updated to {df['date'].max()}")
+
+    for fid in _AUX_FUTURES_IDS:
+        last = last_futures_inst_date(fid) or DATA_START
+        if last < today_str:
+            df = fetch_futures_inst(fid, last)
+            if df is not None and not df.empty:
+                save_futures_inst(fid, df)
+                logger.info(f"Aux futures_inst {fid}: updated to {df['date'].max()}")
+
     # TDCC 千張大戶週報：超過 7 天才更新（一週公布一次）
     last_sh = last_shareholding_date()
     today_dt = datetime.now(_TZ).date()
@@ -135,8 +159,13 @@ def screen_today(universe: pd.DataFrame,
     回傳 {timeframe: DataFrame of signals today}
     timeframe: "short", "swing", "long"
     """
-    results: dict[str, list] = {"long": [], "revenue": [], "growth": [], "accum": []}
+    results: dict[str, list] = {"long": [], "revenue": [], "growth": [], "accum": [], "combo_47": []}
     market_map = dict(zip(universe["stock_id"], universe["market"]))
+
+    # 回測規則：S4 ∩ S7 兩個月內交集 — 60 日勝率 60.4%（vs S7 only 56.9%），
+    # 60 日中位 +5.46%（vs +2.82%）。當「今日 S4 或 S7 觸發 + 對方在過去 60 交易日
+    # 內也有觸發過」就標進 combo_47，這是高信心進場候選。
+    COMBO_WINDOW = 60
 
     # 大盤過濾：今天是否多頭趨勢
     today_str = datetime.now(_TZ).strftime("%Y-%m-%d")
@@ -180,6 +209,22 @@ def screen_today(universe: pd.DataFrame,
     last_trading_day = taiex_price["date"].max() if not taiex_price.empty else pd.Timestamp("2000-01-01")
     logger.info(f"Latest trading day (0050): {last_trading_day.date()}")
 
+    # S5 regime gauge：用 0050 過去 60 日報酬率判斷市場熱度
+    # 回測：S5 在 0050 60d 勝率 >= 65% 時 80% 勝率 +42% avg；< 50% 時 -0.13%
+    regime_label = "🟡 中性"
+    regime_60d_return = 0.0
+    if len(taiex_price) >= 65:
+        recent = taiex_price.sort_values("date").tail(65).reset_index(drop=True)
+        # 60 日報酬率
+        regime_60d_return = float(recent.iloc[-1]["close"] / recent.iloc[-61]["close"] - 1)
+        if regime_60d_return >= 0.05:
+            regime_label = "🔥 多頭（S5 升級主力）"
+        elif regime_60d_return <= -0.05:
+            regime_label = "🥶 空頭（S5 暫停/減半）"
+        else:
+            regime_label = "🟡 中性"
+    logger.info(f"Regime gauge: {regime_label}  0050 60d return={regime_60d_return*100:+.1f}%")
+
     stale_cutoff = pd.Timestamp(datetime.now(_TZ).date()) - pd.Timedelta(days=15)  # ~10 交易日
     signal_errors: dict[str, int] = {}  # exception class → count
 
@@ -203,9 +248,15 @@ def screen_today(universe: pd.DataFrame,
 
         try:
             s4_ok = sid in fund_ok and (retail_ok_s4 is None or sid in retail_ok_s4)
+            df_l = None
+            df_a = None
+            s4_today = False
+            s7_today = False
+
             if s4_ok:
                 df_l = signal_longterm_quality_entry(price, inst_arg, per_df=per_arg, market_filter=strict_mf, inst_threshold=_S4_INST_THR)
-                if bool(df_l.iloc[-1]["signal_long"]):
+                s4_today = bool(df_l.iloc[-1]["signal_long"])
+                if s4_today:
                     results["long"].append(_summary_row(sid, market, df_l, "long"))
 
             # 策略五：月營收動能（每月 10 日後第一個交易日才會有訊號）
@@ -228,8 +279,22 @@ def screen_today(universe: pd.DataFrame,
                 df_a = signal_accumulation_eve(price, inst_arg,
                     market_filter=mf, inst_threshold=_S7_INST_THR,
                     aqs_min=_S7_AQS_MIN)
-                if bool(df_a.iloc[-1].get("signal_accum", False)):
+                s7_today = bool(df_a.iloc[-1].get("signal_accum", False))
+                if s7_today:
                     results["accum"].append(_summary_row(sid, market, df_a, "accum"))
+
+            # S4 ∩ S7 combo：今日有 S4 或 S7，且另一邊在過去 COMBO_WINDOW 交易日
+            # 內也曾觸發 → 高信心進場
+            if s4_ok and df_l is not None and df_a is not None and (s4_today or s7_today):
+                recent_s4 = bool(df_l["signal_long"].tail(COMBO_WINDOW + 1).any())
+                recent_s7 = bool(df_a["signal_accum"].tail(COMBO_WINDOW + 1).any())
+                if recent_s4 and recent_s7:
+                    # 用今日觸發那邊的 dataframe 取數值；S4 優先（含 PER 等較完整）
+                    primary_df = df_l if s4_today else df_a
+                    row = _summary_row(sid, market, primary_df, "combo_47")
+                    row["s4_today"] = s4_today
+                    row["s7_today"] = s7_today
+                    results["combo_47"].append(row)
 
         except Exception as e:
             cls = type(e).__name__
@@ -242,8 +307,8 @@ def screen_today(universe: pd.DataFrame,
         logger.warning(f"Signal computation failed for {total} stocks ({breakdown})")
 
     # 對每個訊號補上 AQS（累積品質分）+ stage + verdict
-    # S4 (long), S6 (growth), S7 (accum) 都加 AQS 二次確認
-    for tf in ("long", "growth", "accum"):
+    # S4 (long), S6 (growth), S7 (accum), combo_47 都加 AQS 二次確認
+    for tf in ("long", "growth", "accum", "combo_47"):
         for row in results[tf]:
             sid = row["stock_id"]
             try:
@@ -255,11 +320,17 @@ def screen_today(universe: pd.DataFrame,
             except Exception as e:
                 logger.debug(f"AQS compute failed for {sid}: {e}")
 
-    return {
+    out = {
         k: pd.DataFrame(v).sort_values("vol_ratio", ascending=False)
         if v else pd.DataFrame()
         for k, v in results.items()
     }
+    # 把 regime 訊息塞進結果，供 notify 顯示
+    out["_meta"] = pd.DataFrame([{
+        "regime_label": regime_label,
+        "regime_60d_return": regime_60d_return,
+    }])
+    return out
 
 
 def _summary_row(stock_id: str, market: str,
