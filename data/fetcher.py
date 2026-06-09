@@ -240,6 +240,27 @@ def fetch_emerging_stock_list() -> pd.DataFrame:
     return emerging[existing].reset_index(drop=True)
 
 
+def fetch_futures_inst(futures_id: str, start: str, end: str = "") -> pd.DataFrame | None:
+    """期貨三大法人未平倉。回傳含三家法人（外資/投信/自營商）的長表。"""
+    df = _finmind("TaiwanFuturesInstitutionalInvestors", futures_id, start, end)
+    if df is None:
+        return None
+    if df.empty:
+        return df
+
+    long_oi = pd.to_numeric(df["long_open_interest_balance_volume"], errors="coerce")
+    short_oi = pd.to_numeric(df["short_open_interest_balance_volume"], errors="coerce")
+    out = pd.DataFrame({
+        "date": df["date"],
+        "institution": df["institutional_investors"],
+        "long_oi": long_oi,
+        "short_oi": short_oi,
+        "net_oi": long_oi - short_oi,
+    })
+    out["date"] = pd.to_datetime(out["date"])
+    return out.sort_values(["date", "institution"]).reset_index(drop=True)
+
+
 def rate_limit_sleep(n_stocks: int, req_per_stock: int = 3) -> None:
     """估算需要 sleep 多少秒以不超過 600 req/hr"""
     total = n_stocks * req_per_stock

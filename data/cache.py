@@ -102,6 +102,16 @@ def init_db() -> None:
         total_shares      REAL,           -- 集保庫存總股數
         PRIMARY KEY (stock_id, date)
     );
+
+    CREATE TABLE IF NOT EXISTS futures_inst (
+        futures_id  TEXT NOT NULL,        -- 商品代號 (TX = 台指期)
+        date        TEXT NOT NULL,
+        institution TEXT NOT NULL,        -- 外資/投信/自營商
+        long_oi     REAL,                 -- 多方未平倉口數
+        short_oi    REAL,                 -- 空方未平倉口數
+        net_oi      REAL,                 -- 淨多單 = long - short（負數=淨空）
+        PRIMARY KEY (futures_id, date, institution)
+    );
     """
     with _conn() as con:
         con.executescript(ddl)
@@ -131,6 +141,11 @@ def _cleanup_mislabeled_skip() -> None:
         "institutional": "institutional",
         "revenue": "monthly_revenue",
         "per": "daily_per",
+        # 財報三表共用同一張 financial 表；之前漏修，導致 1563 支股票財報
+        # 永久被標 9999 → passes_filter=False → S4/S6/S7 silently skip
+        "fin_stmt": "financial",
+        "fin_bs":   "financial",
+        "fin_cf":   "financial",
     }
     with _conn() as con:
         total_fixed = 0
@@ -468,3 +483,42 @@ def last_shareholding_date() -> str | None:
             "SELECT last_date FROM fetch_log WHERE stock_id='_GLOBAL' AND dataset='shareholding'"
         ).fetchone()
     return row[0] if row else None
+
+
+# ─── futures_inst ─────────────────────────────────────────────────────────────
+
+def save_futures_inst(futures_id: str, df: pd.DataFrame) -> None:
+    if df.empty:
+        return
+    df = df.copy()
+    df["futures_id"] = futures_id
+    df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
+    with _conn() as con:
+        df.to_sql("futures_inst", con, if_exists="append", index=False,
+                  method=_insert_or_ignore)
+        con.execute(
+            "INSERT OR REPLACE INTO fetch_log VALUES (?,?,?)",
+            (futures_id, "futures_inst", df["date"].max())
+        )
+
+
+def load_futures_inst(futures_id: str, institution: str = "外資",
+                      start: str = "2018-01-01") -> pd.DataFrame:
+    with _conn() as con:
+        df = pd.read_sql(
+            "SELECT date, long_oi, short_oi, net_oi FROM futures_inst "
+            "WHERE futures_id=? AND institution=? AND date>=? ORDER BY date",
+            con, params=[futures_id, institution, start]
+        )
+    if not df.empty:
+        df["date"] = pd.to_datetime(df["date"])
+    return df
+
+
+def last_futures_inst_date(futures_id: str) -> str | None:
+    with _conn() as con:
+        row = con.execute(
+            "SELECT last_date FROM fetch_log WHERE stock_id=? AND dataset='futures_inst'",
+            (futures_id,)
+        ).fetchone()
+    return row[0] if row and row[0] < "9999-01-01" else None
