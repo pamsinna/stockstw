@@ -201,10 +201,13 @@ def signal_revenue_momentum(
     rev["revenue"] = pd.to_numeric(rev["revenue"], errors="coerce")
 
     # ── 計算 YoY（百分比，如 20 = 20%）────────────────────────────────────────
-    if "revenue_yoy" in rev.columns and not rev["revenue_yoy"].isna().all():
-        rev["yoy"] = pd.to_numeric(rev["revenue_yoy"], errors="coerce")
+    # FinMind 的 revenue_yoy 在最新一兩個月剛公布時常為 NaN（回填延遲）。
+    # 策略：優先用 FinMind 提供的，缺漏處退回 revenue.pct_change(12) 自行計算。
+    rev["yoy_computed"] = rev["revenue"].pct_change(12) * 100
+    if "revenue_yoy" in rev.columns:
+        rev["yoy"] = pd.to_numeric(rev["revenue_yoy"], errors="coerce").fillna(rev["yoy_computed"])
     else:
-        rev["yoy"] = rev["revenue"].pct_change(12) * 100
+        rev["yoy"] = rev["yoy_computed"]
 
     # 3 個月平均 YoY（不含當月，避免前視偏差）
     rev["yoy_3m_avg"] = rev["yoy"].shift(1).rolling(3, min_periods=2).mean()
