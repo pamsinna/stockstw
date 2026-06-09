@@ -134,8 +134,8 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
     # ── 🎯 高信心：S4 ∩ S7 兩月內交集 ─────────────────────────────────────
     if not combo_df.empty:
         c_lines = [
-            f"🎯 <b>高信心進場 (S4 ∩ S7)</b>  共 {len(combo_df)} 支",
-            "<i>回測 60 日勝率 60.4%（vs S7 only 56.9%），中位 +5.46%</i>\n",
+            f"🎯 <b>高信心進場 (S4 ∩ S7, 20d 窗)</b>  共 {len(combo_df)} 支",
+            "<i>回測 60 日勝率 66.3%、平均 +11.33%（vs S7 only 56.9%）</i>\n",
         ]
         for _, row in combo_df.head(MAX_POSITIONS).iterrows():
             emoji = MARKET_EMOJI.get(row.get("market", "TWSE"), "⚪")

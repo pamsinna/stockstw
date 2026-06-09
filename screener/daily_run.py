@@ -162,10 +162,10 @@ def screen_today(universe: pd.DataFrame,
     results: dict[str, list] = {"long": [], "revenue": [], "growth": [], "accum": [], "combo_47": []}
     market_map = dict(zip(universe["stock_id"], universe["market"]))
 
-    # 回測規則：S4 ∩ S7 兩個月內交集 — 60 日勝率 60.4%（vs S7 only 56.9%），
-    # 60 日中位 +5.46%（vs +2.82%）。當「今日 S4 或 S7 觸發 + 對方在過去 60 交易日
-    # 內也有觸發過」就標進 combo_47，這是高信心進場候選。
-    COMBO_WINDOW = 60
+    # 回測規則：S4 ∩ S7 在 20 交易日內接力 — 60 日勝率 66.3%、平均 +11.33%
+    # （vs 60d window 的 60.4% / +10.37%，vs S7 only 56.9% / +8.40%）。
+    # 20d 是甜蜜點：兩 leg 隔太久反而把弱訊號也算進來，剛接力的最強。
+    COMBO_WINDOW = 20
 
     # 大盤過濾：今天是否多頭趨勢
     today_str = datetime.now(_TZ).strftime("%Y-%m-%d")
