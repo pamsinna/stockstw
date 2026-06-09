@@ -32,7 +32,6 @@ def collect_findings() -> list[dict]:
     con = sqlite3.connect(DB_PATH)
     today = date.today()
     price_cutoff = today - timedelta(days=7)
-    per_cutoff = today - timedelta(days=7)
 
     findings: list[dict] = []
 
@@ -132,7 +131,8 @@ def print_report(findings: list[dict]) -> None:
 
     for sev, emoji in [("critical", "🚨"), ("warning", "⚠️"), ("ok", "✅")]:
         items = by_sev.get(sev, [])
-        if not items: continue
+        if not items:
+            continue
         print(f"\n{emoji} {sev.upper()} ({len(items)})")
         for f in items:
             print(f"   • {f['message']}")

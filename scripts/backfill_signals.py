@@ -12,7 +12,7 @@ from __future__ import annotations
 import sys
 import warnings
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import pandas as pd
 from tqdm import tqdm
@@ -156,7 +156,8 @@ def backfill(start: str, end: str) -> None:
         print(f"\n─── {d}（{len(day)} 訊號）───")
         for strat in ["S4", "S5", "S6", "S7"]:
             rows = day[day["strategy"] == strat]
-            if rows.empty: continue
+            if rows.empty:
+                continue
             names = [f"{r['sid']} {r['name']}({r['close']:.0f})" for _, r in rows.iterrows()]
             print(f"  {strat} [{len(rows)}]: {', '.join(names)}")
 
