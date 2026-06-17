@@ -20,6 +20,8 @@ _RATE_LIMIT_SEC = 6.0  # FinMind free tier: 600 req/hr → 6 s/req
 
 TWSE_BASE = "https://www.twse.com.tw/exchangeReport"
 TPEX_BASE = "https://www.tpex.org.tw/web/stock"
+TWSE_FUND = "https://www.twse.com.tw/fund"          # 三大法人 T86
+TPEX_WWW  = "https://www.tpex.org.tw/www/zh-tw"     # 上櫃新版 JSON API
 
 _session = requests.Session()
 _session.headers.update({"User-Agent": "Mozilla/5.0 (research bot)"})
@@ -28,10 +30,10 @@ _session.headers.update({"User-Agent": "Mozilla/5.0 (research bot)"})
 _PERM_SKIP = object()  # sentinel: 403 — permanent skip, no retry, no sleep
 
 
-def _get(url: str, params: dict, retries: int = 3, delay: float = 1.0):
+def _get(url: str, params: dict, retries: int = 3, delay: float = 1.0, timeout: int = 15):
     for i in range(retries):
         try:
-            r = _session.get(url, params=params, timeout=15)
+            r = _session.get(url, params=params, timeout=timeout)
             # 403 = 已下市或無權限，永久跳過
             if r.status_code == 403:
                 return _PERM_SKIP
@@ -214,6 +216,116 @@ def fetch_per(stock_id: str, start: str) -> pd.DataFrame | None:
     needed = ["date", "per", "pbr", "div_yield"]
     existing = [c for c in needed if c in df.columns]
     return df[existing].sort_values("date").reset_index(drop=True)
+
+
+# ─── 官方 bulk：單一請求回傳全市場單日資料（免 token、無 600/hr 限流）─────────────
+# FinMind 一檔一請求，1145 檔 × 6s 撐不過免費額度 → 每天只刷新 ~287 檔。
+# TWSE/TPEx 官方一次回傳整個市場，每日只需個位數請求。值經比對與 FinMind 完全一致。
+
+def _num(s) -> float | None:
+    """清掉千分位逗號、處理 '--'/'---'/空白等佔位符。"""
+    if s is None:
+        return None
+    s = str(s).replace(",", "").strip()
+    if s in ("", "--", "---", "X", "x", "N/A", "尚無成交價"):
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def fetch_twse_prices_by_date(date_iso: str) -> pd.DataFrame:
+    """全上市個股單日 OHLCV（MI_INDEX）。非交易日／無資料回傳空 DataFrame。"""
+    data = _get(f"{TWSE_BASE}/MI_INDEX",
+                {"response": "json", "date": date_iso.replace("-", ""), "type": "ALLBUT0999"}, timeout=30)
+    if not data or data is _PERM_SKIP or data.get("stat") != "OK":
+        return pd.DataFrame()
+    table = next((t for t in data.get("tables", [])
+                  if "證券代號" in (t.get("fields") or []) and "收盤價" in t["fields"]), None)
+    if not table or not table.get("data"):
+        return pd.DataFrame()
+    idx = {name: i for i, name in enumerate(table["fields"])}
+    rows = [{
+        "stock_id": r[idx["證券代號"]].strip(),
+        "date": date_iso,
+        "open": _num(r[idx["開盤價"]]), "high": _num(r[idx["最高價"]]),
+        "low": _num(r[idx["最低價"]]), "close": _num(r[idx["收盤價"]]),
+        "volume": _num(r[idx["成交股數"]]),
+    } for r in table["data"]]
+    return pd.DataFrame(rows).dropna(subset=["close"])
+
+
+def fetch_tpex_prices_by_date(date_iso: str) -> pd.DataFrame:
+    """全上櫃個股單日 OHLCV（新版 dailyQuotes）。非交易日回傳空 DataFrame。"""
+    y, m, d = date_iso.split("-")
+    data = _get(f"{TPEX_WWW}/afterTrading/dailyQuotes",
+                {"date": f"{y}/{m}/{d}", "type": "EW", "response": "json"}, timeout=30)
+    if not data or data is _PERM_SKIP or str(data.get("stat", "")).lower() != "ok":
+        return pd.DataFrame()
+    tables = data.get("tables") or []
+    if not tables or not tables[0].get("data"):
+        return pd.DataFrame()
+    idx = {name: i for i, name in enumerate(tables[0]["fields"])}
+    rows = [{
+        "stock_id": r[idx["代號"]].strip(),
+        "date": date_iso,
+        "open": _num(r[idx["開盤"]]), "high": _num(r[idx["最高"]]),
+        "low": _num(r[idx["最低"]]), "close": _num(r[idx["收盤"]]),
+        "volume": _num(r[idx["成交股數"]]),
+    } for r in tables[0]["data"]]
+    return pd.DataFrame(rows).dropna(subset=["close"])
+
+
+def fetch_twse_inst_by_date(date_iso: str) -> pd.DataFrame:
+    """全上市三大法人買賣超（T86）。欄位語意與 FinMind 比對一致。"""
+    data = _get(f"{TWSE_FUND}/T86",
+                {"response": "json", "date": date_iso.replace("-", ""), "selectType": "ALLBUT0999"}, timeout=30)
+    if not data or data is _PERM_SKIP or data.get("stat") != "OK":
+        return pd.DataFrame()
+    fields = data.get("fields") or []
+    if "證券代號" not in fields:
+        return pd.DataFrame()
+    idx = {name: i for i, name in enumerate(fields)}
+    fcol, tcol, dcol = ("外陸資買賣超股數(不含外資自營商)", "投信買賣超股數", "自營商買賣超股數")
+    rows = [{
+        "stock_id": r[idx["證券代號"]].strip(),
+        "date": date_iso,
+        "foreign_": _num(r[idx[fcol]]), "trust": _num(r[idx[tcol]]), "dealer": _num(r[idx[dcol]]),
+    } for r in data.get("data", [])]
+    return pd.DataFrame(rows)
+
+
+def fetch_tpex_inst_by_date(date_iso: str) -> pd.DataFrame:
+    """全上櫃三大法人買賣超（dailyTrade）。欄位以位置對應（已比對 DB 驗證）：
+    外陸資(不含外資自營)=4、投信=13、自營商合計=22。"""
+    y, m, d = date_iso.split("-")
+    data = _get(f"{TPEX_WWW}/insti/dailyTrade",
+                {"type": "Daily", "sect": "EW", "date": f"{y}/{m}/{d}", "response": "json"}, timeout=30)
+    if not data or data is _PERM_SKIP or str(data.get("stat", "")).lower() != "ok":
+        return pd.DataFrame()
+    tables = data.get("tables") or []
+    if not tables or not tables[0].get("data"):
+        return pd.DataFrame()
+    rows = [{
+        "stock_id": r[0].strip(), "date": date_iso,
+        "foreign_": _num(r[4]), "trust": _num(r[13]), "dealer": _num(r[22]),
+    } for r in tables[0]["data"] if len(r) > 22]
+    return pd.DataFrame(rows)
+
+
+def fetch_all_prices_by_date(date_iso: str) -> pd.DataFrame:
+    """TWSE + TPEx 單日全市場 OHLCV。"""
+    parts = [fetch_twse_prices_by_date(date_iso), fetch_tpex_prices_by_date(date_iso)]
+    parts = [p for p in parts if not p.empty]
+    return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+
+
+def fetch_all_inst_by_date(date_iso: str) -> pd.DataFrame:
+    """TWSE + TPEx 單日全市場三大法人。"""
+    parts = [fetch_twse_inst_by_date(date_iso), fetch_tpex_inst_by_date(date_iso)]
+    parts = [p for p in parts if not p.empty]
+    return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
 
 
 def fetch_stock_list_finmind() -> pd.DataFrame:

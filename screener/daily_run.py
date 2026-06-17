@@ -4,8 +4,9 @@
 2. 對每個通過基本面的股票算技術訊號
 3. 分三個時間框架輸出當日訊號清單，並套用大盤過濾
 """
+import time
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -14,14 +15,16 @@ from tqdm import tqdm
 from config import DATA_START
 from data.cache import (
     init_db, load_prices, load_institutional, load_monthly_revenue, load_per,
-    save_prices, save_institutional, last_price_date, last_institutional_date,
+    save_prices, save_institutional, save_prices_bulk, save_institutional_bulk,
+    last_price_date, last_institutional_date, earliest_last_date_since,
     last_revenue_date, mark_fetch_skip, load_shareholding_latest,
     save_shareholding, last_shareholding_date,
     save_futures_inst, last_futures_inst_date,
 )
 from data.universe import build_universe
 from data.fetcher import (fetch_price, fetch_institutional, fetch_monthly_revenue,
-                          fetch_tdcc_shareholding, fetch_futures_inst)
+                          fetch_tdcc_shareholding, fetch_futures_inst,
+                          fetch_all_prices_by_date, fetch_all_inst_by_date)
 from backtest.run_backtest import build_market_filter, _normalize_and_save_revenue
 from fundamental.quality_filter import batch_fundamentals
 from technical.signals import (
@@ -53,39 +56,74 @@ _S7 = next(s for s in STRATEGIES if s["name"] == "累積前夕")
 _S7_INST_THR = _S7.get("inst_threshold", 3_000_000)
 _S7_AQS_MIN = _S7.get("aqs_min", 70.0)
 
+# 官方 bulk 補資料的回看窗（日曆天）：足以涵蓋連假／漏跑；超過此窗仍落後的
+# 個股（新股 / bootstrap）才退回 FinMind 逐檔深歷史。
+BULK_LOOKBACK_DAYS = 30
+# 每次至少重抓最近這幾天（即使全市場都已最新）：讓偶發單日缺口下次跑自動補回。
+MIN_REFETCH_DAYS = 7
+
 
 def incremental_update(universe: pd.DataFrame) -> None:
     """
     更新所有 universe 內的股票：
-    - 已有 fetch_log entry 的 → 從 last_date 續抓
-    - 沒 entry 的（新股 / 被清掉的）→ 從 DATA_START 全量抓
-    - 加 0050（大盤代理）
+    - 價量 + 三大法人：用 TWSE/TPEx 官方 bulk（單一請求回傳全市場單日）補最近
+      BULK_LOOKBACK_DAYS 天 → 免 token、無 600/hr 限流、整批一致。
+    - 仍落後超過 bulk 窗的個股（新股 / bootstrap）→ 退回 FinMind 逐檔深歷史。
+    - 0050（大盤代理）含在 keep 內，確保 last_trading_day 永遠跟上。
     """
-    today_str = datetime.now(_TZ).strftime("%Y-%m-%d")
+    today = datetime.now(_TZ).date()
+    today_str = today.strftime("%Y-%m-%d")
 
     all_stocks = universe["stock_id"].tolist()
-    # 全 universe 都要 update（包含新股 last_price_date=None）
-    stocks_to_update = list(all_stocks)
-    if TAIEX_PROXY not in stocks_to_update:
-        stocks_to_update.insert(0, TAIEX_PROXY)
+    keep = set(all_stocks) | {TAIEX_PROXY} | set(_AUX_PRICE_IDS)
 
-    logger.info(f"Incremental update for {len(stocks_to_update)} stocks "
-                f"(out of {len(all_stocks)} in universe)...")
-
-    for sid in tqdm(stocks_to_update, desc="Update"):
-        last = last_price_date(sid) or DATA_START
-        if last >= today_str:
+    # ── 1) 官方 bulk：補最近 BULK_LOOKBACK_DAYS 天的全市場價量 + 法人 ───────────
+    bulk_floor = today - timedelta(days=BULK_LOOKBACK_DAYS)
+    min_refetch = today - timedelta(days=MIN_REFETCH_DAYS)
+    # 起點 = min(最舊活躍 last_date, 最近 MIN_REFETCH_DAYS 天)，但不早於 bulk_floor。
+    # 取「最近 N 天」這層保證即使全市場都最新，仍會重抓近窗 → 偶發單日缺口冪等補回。
+    earliest = earliest_last_date_since("price", bulk_floor.isoformat())
+    start_active = datetime.fromisoformat(earliest).date() if earliest else bulk_floor
+    start = max(min(start_active, min_refetch), bulk_floor)
+    n_days = (today - start).days + 1
+    logger.info(f"Bulk fill (TWSE/TPEx official) {start}..{today} "
+                f"for {len(keep)} tracked stocks...")
+    n_price = n_inst = 0
+    for offset in tqdm(range(n_days), desc="Bulk"):
+        dt = start + timedelta(days=offset)
+        if dt.weekday() >= 5:  # 週末必非交易日，省一次請求
             continue
+        diso = dt.isoformat()
+        pdf = fetch_all_prices_by_date(diso)
+        if not pdf.empty:
+            pdf = pdf[pdf["stock_id"].isin(keep)]
+            save_prices_bulk(pdf)
+            n_price += len(pdf)
+        idf = fetch_all_inst_by_date(diso)
+        if not idf.empty:
+            idf = idf[idf["stock_id"].isin(keep)]
+            save_institutional_bulk(idf)
+            n_inst += len(idf)
+        time.sleep(0.5)  # 對官方站點客氣一點
+    logger.info(f"Bulk fill done: {n_price} price rows, {n_inst} inst rows.")
 
+    # ── 2) FinMind fallback：只補落後超過 bulk 窗的個股（新股 / bootstrap 深歷史）─
+    floor_str = bulk_floor.isoformat()
+    deep = [sid for sid in ([TAIEX_PROXY] + all_stocks)
+            if (last_price_date(sid) or DATA_START) < floor_str]
+    if deep:
+        logger.info(f"FinMind deep-history fallback for {len(deep)} stocks "
+                    f"behind {floor_str}...")
+    for sid in tqdm(deep, desc="Backfill"):
+        last = last_price_date(sid) or DATA_START
         price = fetch_price(sid, last)  # rate-limited inside _finmind()
         if price is None:
             mark_fetch_skip(sid, "price")
         elif not price.empty:
             save_prices(sid, price)
 
-        # 法人獨立判斷：價格 403 不代表法人歷史資料不能補
         last_inst = last_institutional_date(sid) or DATA_START
-        if last_inst < today_str:
+        if last_inst < floor_str:
             inst = fetch_institutional(sid, last_inst)  # rate-limited inside _finmind()
             if inst is None:
                 mark_fetch_skip(sid, "institutional")
@@ -93,7 +131,6 @@ def incremental_update(universe: pd.DataFrame) -> None:
                 save_institutional(sid, inst)
 
     # 月營收：每月 1～10 號才抓（法規要求 10 號前公布，提早抓以第一時間收到）
-    today = datetime.now(_TZ)
     if today.day <= 10:
         # 以「上個月1日」為 stale 基準：避免 today-35天 比月初早一天造成全量重跑
         # 例如：5月7日 → stale_before = 2026-04-01；有四月營收的股票全部跳過
@@ -103,7 +140,7 @@ def incremental_update(universe: pd.DataFrame) -> None:
             y, m = y - 1, 12
         stale_before = f"{y}-{m:02d}-01"
         rev_targets = [
-            sid for sid in stocks_to_update
+            sid for sid in all_stocks
             if (last_revenue_date(sid) or DATA_START) < stale_before
         ]
         if rev_targets:

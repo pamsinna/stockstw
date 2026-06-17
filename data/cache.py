@@ -209,6 +209,31 @@ def save_prices(stock_id: str, df: pd.DataFrame) -> None:
         )
 
 
+def save_prices_bulk(df: pd.DataFrame) -> None:
+    """批次寫入多檔／多日價量（官方 bulk 來源）。
+
+    df 欄位：stock_id, date, open, high, low, close, volume。
+    用 INSERT OR IGNORE 避免覆蓋既有列；fetch_log 只在新日期較新時前進，
+    不會把已較新的個股回退。
+    """
+    if df.empty:
+        return
+    df = df.copy()
+    df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
+    cols = ["stock_id", "date", "open", "high", "low", "close", "volume"]
+    df = df[cols]
+    maxd = df.groupby("stock_id")["date"].max()
+    with _conn() as con:
+        df.to_sql("daily_price", con, if_exists="append", index=False,
+                  method=_insert_or_ignore)
+        con.executemany(
+            "INSERT INTO fetch_log(stock_id, dataset, last_date) VALUES (?, 'price', ?) "
+            "ON CONFLICT(stock_id, dataset) DO UPDATE SET last_date=excluded.last_date "
+            "WHERE excluded.last_date > fetch_log.last_date",
+            list(maxd.items())
+        )
+
+
 def load_prices(stock_id: str, start: str = "2018-01-01", end: str = "") -> pd.DataFrame:
     q = "SELECT * FROM daily_price WHERE stock_id=? AND date>=?"
     params: list = [stock_id, start]
@@ -232,6 +257,21 @@ def last_price_date(stock_id: str) -> str | None:
     return row[0] if row else None
 
 
+def earliest_last_date_since(dataset: str, cutoff: str) -> str | None:
+    """最近還活躍（last_date >= cutoff）的個股中，最舊的 last_date。
+
+    用來決定 bulk 補資料的起點：正常每日跑時 = 昨天（只補 1～2 日），
+    積壓時 = 最落後個股的日期（一次補齊缺口）。完全落後（< cutoff）的
+    個股不算進來，交給 FinMind 深歷史 fallback。
+    """
+    with _conn() as con:
+        row = con.execute(
+            "SELECT MIN(last_date) FROM fetch_log WHERE dataset=? AND last_date>=?",
+            (dataset, cutoff)
+        ).fetchone()
+    return row[0] if row and row[0] else None
+
+
 # ─── institutional ────────────────────────────────────────────────────────────
 
 def save_institutional(stock_id: str, df: pd.DataFrame) -> None:
@@ -249,6 +289,29 @@ def save_institutional(stock_id: str, df: pd.DataFrame) -> None:
         con.execute(
             "INSERT OR REPLACE INTO fetch_log VALUES (?,?,?)",
             (stock_id, "institutional", df["date"].max())
+        )
+
+
+def save_institutional_bulk(df: pd.DataFrame) -> None:
+    """批次寫入多檔／多日三大法人買賣超（官方 bulk 來源）。
+
+    df 欄位：stock_id, date, foreign_, trust, dealer。語意同 save_prices_bulk。
+    """
+    if df.empty:
+        return
+    df = df.copy()
+    df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
+    cols = ["stock_id", "date", "foreign_", "trust", "dealer"]
+    df = df[cols]
+    maxd = df.groupby("stock_id")["date"].max()
+    with _conn() as con:
+        df.to_sql("institutional", con, if_exists="append", index=False,
+                  method=_insert_or_ignore)
+        con.executemany(
+            "INSERT INTO fetch_log(stock_id, dataset, last_date) VALUES (?, 'institutional', ?) "
+            "ON CONFLICT(stock_id, dataset) DO UPDATE SET last_date=excluded.last_date "
+            "WHERE excluded.last_date > fetch_log.last_date",
+            list(maxd.items())
         )
 
 
