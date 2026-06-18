@@ -463,7 +463,7 @@ def signal_accumulation_eve(df: pd.DataFrame,
                              market_filter: pd.Series | None = None,
                              inst_threshold: int = 3_000_000,
                              price_chg_low: float = -5.0,
-                             price_chg_high: float = 25.0,
+                             price_chg_high: float = 35.0,
                              pos_max: float = 0.75,
                              aqs_min: float = 70.0) -> pd.DataFrame:
     """
@@ -472,7 +472,9 @@ def signal_accumulation_eve(df: pd.DataFrame,
     進場條件（全部滿足）：
       1. 外資 + 投信 60 日累計 ≥ inst_threshold 股
       2. 股價 60 日漲幅 in [price_chg_low, price_chg_high]
-         （-5% ~ +25%：法人在累積但股價還沒被 price-in）
+         （-5% ~ +35%：法人在累積但股價還沒被 price-in。上限由 25→35：
+          OOS/IS 掃描顯示 25→50 只多 2~15 筆、>50 無效，35 在牛市小賺、
+          熊市退化小，且大半噴出股已被「位置<0.75」擋掉，上限多為重複保險）
       3. 收盤位置 < pos_max（離 60 日高還有空間，未突破）
       4. AQS 估計 ≥ aqs_min（dim1+dim2+18+dim4 ≥ 70）
       5. AQS dim4 ≥ 5（法人 vs 股價同向，無紅旗）
