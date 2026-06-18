@@ -144,7 +144,7 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
             f60   = row.get("f_60d", float("nan"))
             t60   = row.get("t_60d", float("nan"))
             inst60 = (0 if pd.isna(f60) else f60) + (0 if pd.isna(t60) else t60)
-            inst_str = f"+{int(inst60//1000)}K" if inst60 > 0 else f"{int(inst60//1000)}K"
+            inst_str = f"+{int(inst60//1000)}張" if inst60 > 0 else f"{int(inst60//1000)}張"
             name = names.get(sid, "")
             s4_today = row.get("s4_today", False)
             s7_today = row.get("s7_today", False)
@@ -193,7 +193,7 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
             bb_str  = f"{bb*100:.0f}%" if not pd.isna(bb) else "—"
             per_str = f"{per:.0f}" if not pd.isna(per) and per > 0 else "—"
             inst60  = (0 if pd.isna(f60) else f60) + (0 if pd.isna(t60) else t60)
-            inst_str = f"+{int(inst60//1000)}K" if inst60 > 0 else f"{int(inst60//1000)}K"
+            inst_str = f"+{int(inst60//1000)}張" if inst60 > 0 else f"{int(inst60//1000)}張"
             name = names.get(sid, "")
             aqs = row.get("aqs_score", float("nan"))
             stage = row.get("aqs_stage", "")
@@ -233,7 +233,7 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
             per_str = f"{per:.0f}" if not pd.isna(per) and per > 0 else "—"
             yoy_str = f"+{yoy:.0f}%" if not pd.isna(yoy) else "—"
             f20_val = 0 if pd.isna(f20) else f20
-            f20_str = f"+{int(f20_val//1000)}K" if f20_val > 0 else f"{int(f20_val//1000)}K"
+            f20_str = f"+{int(f20_val//1000)}張" if f20_val > 0 else f"{int(f20_val//1000)}張"
             name = names.get(sid, "")
             rev_lines.append(
                 f"{emoji} <b>{sid} {name}</b>  ${close}  "
@@ -263,7 +263,7 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
             t60   = row.get("t_60d", float("nan"))
             vol_r = row.get("vol_ratio", float("nan"))
             inst60 = (0 if pd.isna(f60) else f60) + (0 if pd.isna(t60) else t60)
-            inst_str = f"+{int(inst60//1000)}K" if inst60 > 0 else f"{int(inst60//1000)}K"
+            inst_str = f"+{int(inst60//1000)}張" if inst60 > 0 else f"{int(inst60//1000)}張"
             vol_s = f"{vol_r:.1f}x" if not pd.isna(vol_r) else "—"
             name = names.get(sid, "")
             aqs = row.get("aqs_score", float("nan"))
@@ -311,7 +311,7 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
             f60   = row.get("f_60d", float("nan"))
             t60   = row.get("t_60d", float("nan"))
             inst60 = (0 if pd.isna(f60) else f60) + (0 if pd.isna(t60) else t60)
-            inst_str = f"+{int(inst60//1000)}K" if inst60 > 0 else f"{int(inst60//1000)}K"
+            inst_str = f"+{int(inst60//1000)}張" if inst60 > 0 else f"{int(inst60//1000)}張"
             aqs = row.get("aqs_score", float("nan"))
             stage = row.get("aqs_stage", "")
             verdict = row.get("aqs_verdict", "")
