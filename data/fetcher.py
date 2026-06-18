@@ -328,6 +328,51 @@ def fetch_all_inst_by_date(date_iso: str) -> pd.DataFrame:
     return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
 
 
+# ─── 月營收 bulk（MOPS opendata：上市 t187ap05_L + 上櫃 mopsfin_t187ap05_O）──────
+TWSE_OPENAPI = "https://openapi.twse.com.tw/v1"
+TPEX_OPENAPI = "https://www.tpex.org.tw/openapi/v1"
+
+
+def _parse_revenue_opendata(data) -> pd.DataFrame:
+    """把 MOPS opendata（list of dict）轉成 stock_id/date/revenue/revenue_yoy。
+
+    對齊既有 DB（FinMind）慣例：
+    - date 用「申報月」標記 = 營收月 + 1 個月（FinMind: 5月營收 → date 2026-06-01）。
+      實測 opendata 資料年月 11505 的當月營收 == FinMind date 2026-06-01 完全相等。
+    - 單位：當月營收仟元 → 元（×1000）。
+    - YoY：直接取「去年同月增減(%)」（單月 bulk 無法自算 pct_change(12)）。
+    """
+    if not isinstance(data, list) or not data:
+        return pd.DataFrame()
+    rows = []
+    for r in data:
+        ym = str(r.get("資料年月", "")).strip()      # 民國 YYYMM, e.g. "11505"（115年5月）
+        code = str(r.get("公司代號", "")).strip()
+        if len(ym) != 5 or not code.isdigit():
+            continue
+        y, m = int(ym[:3]) + 1911, int(ym[3:])
+        ry, rm = (y + 1, 1) if m == 12 else (y, m + 1)   # 申報月 = 營收月 + 1
+        rev = _num(r.get("營業收入-當月營收"))         # 仟元
+        rows.append({
+            "stock_id": code,
+            "date": f"{ry:04d}-{rm:02d}-01",
+            "revenue": rev * 1000 if rev is not None else None,
+            "revenue_yoy": _num(r.get("營業收入-去年同月增減(%)")),
+        })
+    return pd.DataFrame(rows)
+
+
+def fetch_all_monthly_revenue() -> pd.DataFrame:
+    """全市場最新月營收（上市+上櫃 MOPS opendata）。免 token、各一次請求。"""
+    parts = []
+    for url in (f"{TWSE_OPENAPI}/opendata/t187ap05_L",
+                f"{TPEX_OPENAPI}/mopsfin_t187ap05_O"):
+        df = _parse_revenue_opendata(_get(url, {}, timeout=30))
+        if not df.empty:
+            parts.append(df)
+    return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+
+
 def fetch_stock_list_finmind() -> pd.DataFrame:
     """FinMind 股票清單（含興櫃）"""
     params = {"dataset": "TaiwanStockInfo", "token": FINMIND_TOKEN}

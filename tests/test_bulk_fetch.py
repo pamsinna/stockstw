@@ -171,6 +171,46 @@ def test_save_institutional_bulk_and_foreign_column(temp_db):
     assert cache.last_institutional_date("2330") == "2026-06-17"
 
 
+def test_parse_revenue_opendata_unit_and_report_month(monkeypatch):
+    # 資料年月 11505 = 民國115年5月營收 → 申報月 +1 → date 2026-06-01；仟元 ×1000
+    data = [{"資料年月": "11505", "公司代號": "2330",
+             "營業收入-當月營收": "416975163", "營業收入-去年同月增減(%)": "30.09"}]
+    df = fetcher._parse_revenue_opendata(data)
+    r = df.iloc[0]
+    assert r["date"] == "2026-06-01"
+    assert r["revenue"] == 416975163000.0
+    assert abs(r["revenue_yoy"] - 30.09) < 1e-6
+    # 12 月營收 → 跨年申報隔年 1 月
+    dec = [{"資料年月": "11412", "公司代號": "1101",
+            "營業收入-當月營收": "1000", "營業收入-去年同月增減(%)": "5"}]
+    assert fetcher._parse_revenue_opendata(dec).iloc[0]["date"] == "2026-01-01"
+    # 非 list / 空 → 空 DataFrame
+    assert fetcher._parse_revenue_opendata(None).empty
+
+
+def test_save_monthly_revenue_bulk(temp_db):
+    cache.save_monthly_revenue_bulk(pd.DataFrame([
+        {"stock_id": "2330", "date": "2026-06-01", "revenue": 4.16e11, "revenue_yoy": 30.0},
+    ]))
+    r = cache.load_monthly_revenue("2330")
+    assert len(r) == 1 and r.iloc[0]["revenue"] == 4.16e11
+    assert cache.last_revenue_date("2330") == "2026-06-01"
+
+
+def test_screen_today_aborts_on_stale_proxy(monkeypatch):
+    """絕對日曆 gate：0050 落後現實太多 → 中止選股、回傳空訊號 + stale meta。"""
+    import screener.daily_run as dr
+    monkeypatch.setattr(dr, "build_market_filter", lambda **k: pd.Series(dtype=bool))
+    monkeypatch.setattr(dr, "load_shareholding_latest", lambda: pd.DataFrame())
+    stale = pd.DataFrame({"date": pd.to_datetime(["2020-01-01", "2020-01-02"]),
+                          "close": [100.0, 101.0]})
+    monkeypatch.setattr(dr, "load_prices", lambda *a, **k: stale)
+    uni = pd.DataFrame({"stock_id": ["2330"], "market": ["TWSE"]})
+    out = dr.screen_today(uni, use_fundamental_filter=False)
+    assert all(out[k].empty for k in ("long", "revenue", "growth", "accum", "combo_47"))
+    assert out["_meta"].iloc[0]["data_stale_days"] > dr.MAX_PROXY_STALE_DAYS
+
+
 def test_earliest_last_date_since(temp_db):
     cache.save_prices_bulk(pd.DataFrame([
         {"stock_id": "A", "date": "2026-06-09", "open": 1, "high": 1, "low": 1, "close": 1, "volume": 1},

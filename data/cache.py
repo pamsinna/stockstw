@@ -385,6 +385,30 @@ def save_monthly_revenue(stock_id: str, df: pd.DataFrame) -> None:
         )
 
 
+def save_monthly_revenue_bulk(df: pd.DataFrame) -> None:
+    """批次寫入多檔最新月營收（官方 MOPS bulk）。語意同 save_prices_bulk。
+
+    df 欄位：stock_id, date, revenue, revenue_yoy。
+    """
+    if df.empty:
+        return
+    df = df.copy()
+    df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
+    df["fetched_date"] = str(_date.today())
+    cols = ["stock_id", "date", "revenue", "revenue_yoy", "fetched_date"]
+    df = df[cols]
+    maxd = df.groupby("stock_id")["date"].max()
+    with _conn() as con:
+        df.to_sql("monthly_revenue", con, if_exists="append", index=False,
+                  method=_insert_or_ignore)
+        con.executemany(
+            "INSERT INTO fetch_log(stock_id, dataset, last_date) VALUES (?, 'revenue', ?) "
+            "ON CONFLICT(stock_id, dataset) DO UPDATE SET last_date=excluded.last_date "
+            "WHERE excluded.last_date > fetch_log.last_date",
+            list(maxd.items())
+        )
+
+
 _PROTECTED_STOCKS = {"0050"}  # 大盤代理：永遠不可標記為永久跳過
 
 

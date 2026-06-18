@@ -16,16 +16,18 @@ from config import DATA_START
 from data.cache import (
     init_db, load_prices, load_institutional, load_monthly_revenue, load_per,
     save_prices, save_institutional, save_prices_bulk, save_institutional_bulk,
+    save_monthly_revenue_bulk,
     last_price_date, last_institutional_date, earliest_last_date_since,
-    last_revenue_date, mark_fetch_skip, load_shareholding_latest,
+    mark_fetch_skip, load_shareholding_latest,
     save_shareholding, last_shareholding_date,
     save_futures_inst, last_futures_inst_date,
 )
 from data.universe import build_universe
-from data.fetcher import (fetch_price, fetch_institutional, fetch_monthly_revenue,
+from data.fetcher import (fetch_price, fetch_institutional,
                           fetch_tdcc_shareholding, fetch_futures_inst,
-                          fetch_all_prices_by_date, fetch_all_inst_by_date)
-from backtest.run_backtest import build_market_filter, _normalize_and_save_revenue
+                          fetch_all_prices_by_date, fetch_all_inst_by_date,
+                          fetch_all_monthly_revenue)
+from backtest.run_backtest import build_market_filter
 from fundamental.quality_filter import batch_fundamentals
 from technical.signals import (
     signal_longterm_quality_entry,
@@ -61,6 +63,10 @@ _S7_AQS_MIN = _S7.get("aqs_min", 70.0)
 BULK_LOOKBACK_DAYS = 30
 # 每次至少重抓最近這幾天（即使全市場都已最新）：讓偶發單日缺口下次跑自動補回。
 MIN_REFETCH_DAYS = 7
+# 絕對日曆防呆：代理 0050 最新資料落後現實超過這天數 → 視為資料管線壞掉，中止
+# 選股不發訊號（避免拿舊價當「今日」，見 2026-06 FinMind 額度爆掉事件）。設 7：
+# 涵蓋一般連假，真凍結（會逐日擴大）一週內必觸發；長假誤觸也只是「無新資料不選股」。
+MAX_PROXY_STALE_DAYS = 7
 
 
 def incremental_update(universe: pd.DataFrame) -> None:
@@ -130,29 +136,19 @@ def incremental_update(universe: pd.DataFrame) -> None:
             elif not inst.empty:
                 save_institutional(sid, inst)
 
-    # 月營收：每月 1～10 號才抓（法規要求 10 號前公布，提早抓以第一時間收到）
+    # 月營收：每月 1～10 號補（法規要求 10 號前公布）。改用官方 MOPS opendata
+    # bulk（上市+上櫃各一次回傳全市場最新月）→ 免 token、無 FinMind 限流。
+    # 單月即可：YoY 由 opendata「去年同月增減(%)」直接帶，訊號不需更早歷史。
     if today.day <= 10:
-        # 以「上個月1日」為 stale 基準：避免 today-35天 比月初早一天造成全量重跑
-        # 例如：5月7日 → stale_before = 2026-04-01；有四月營收的股票全部跳過
-        # 6月1日 → stale_before = 2026-05-01；四月營收股票重跑（找五月資料）← 正確
-        y, m = today.year, today.month - 1
-        if m == 0:
-            y, m = y - 1, 12
-        stale_before = f"{y}-{m:02d}-01"
-        rev_targets = [
-            sid for sid in all_stocks
-            if (last_revenue_date(sid) or DATA_START) < stale_before
-        ]
-        if rev_targets:
-            logger.info(f"Refreshing monthly revenue for {len(rev_targets)} stocks "
-                        f"(stale before {stale_before})...")
-            for sid in tqdm(rev_targets, desc="Revenue"):
-                fetch_start = last_revenue_date(sid) or DATA_START
-                rev = fetch_monthly_revenue(sid, fetch_start)  # rate-limited inside _finmind()
-                if rev is None:
-                    mark_fetch_skip(sid, "revenue")
-                elif not rev.empty:
-                    _normalize_and_save_revenue(sid, rev)
+        logger.info("Refreshing monthly revenue via official MOPS bulk (TWSE+TPEx)...")
+        rev = fetch_all_monthly_revenue()
+        if not rev.empty:
+            rev = rev[rev["stock_id"].isin(set(all_stocks))]
+            save_monthly_revenue_bulk(rev)
+            ym = rev["date"].iloc[0] if len(rev) else "—"
+            logger.info(f"Monthly revenue bulk: {len(rev)} rows (latest month {ym}).")
+        else:
+            logger.warning("Monthly revenue bulk returned empty — MOPS opendata unavailable")
 
     # Regime gauge 用的衍生資料（0056 + TX 期貨）— sync_db 會覆蓋 local，
     # 因此每次 incremental_update 都要重新補齊
@@ -245,6 +241,23 @@ def screen_today(universe: pd.DataFrame,
     taiex_price = load_prices(TAIEX_PROXY, start="2024-01-01")
     last_trading_day = taiex_price["date"].max() if not taiex_price.empty else pd.Timestamp("2000-01-01")
     logger.info(f"Latest trading day (0050): {last_trading_day.date()}")
+
+    # 絕對日曆 freshness gate（belt-and-suspenders）：last_trading_day 來自 0050 自身，
+    # 若整條管線壞掉、0050 也凍結，原本的 last_date < last_trading_day 守門就形同虛設
+    # （拿舊價當今日）。這裡用 wall-clock 絕對比對，落後太多就中止選股、不發訊號。
+    proxy_stale_days = (pd.Timestamp(datetime.now(_TZ).date()) - last_trading_day).days
+    if proxy_stale_days > MAX_PROXY_STALE_DAYS:
+        logger.error(
+            f"🚨 資料過期：代理 {TAIEX_PROXY} 最新 {last_trading_day.date()}，落後現實 "
+            f"{proxy_stale_days} 天（> {MAX_PROXY_STALE_DAYS}）— 中止選股，不發訊號"
+        )
+        out = {k: pd.DataFrame() for k in ("long", "revenue", "growth", "accum", "combo_47")}
+        out["_meta"] = pd.DataFrame([{
+            "regime_label": f"🚨 資料過期 {proxy_stale_days} 天，已暫停選股",
+            "regime_60d_return": 0.0,
+            "data_stale_days": proxy_stale_days,
+        }])
+        return out
 
     # S5 regime gauge：用 0050 過去 60 日報酬率判斷市場熱度
     # 回測：S5 在 0050 60d 勝率 >= 65% 時 80% 勝率 +42% avg；< 50% 時 -0.13%
