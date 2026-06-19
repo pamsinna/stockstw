@@ -45,7 +45,9 @@ def send_message(text: str) -> bool:
     return ok
 
 
-MAX_POSITIONS      = 10   # 最多同時持有 10 檔
+MAX_POSITIONS      = 10   # 最多同時持有 10 檔（S4/S5/S7：回測顯示 10 檔已足/最佳）
+MAX_POSITIONS_S6   = 15   # S6 例外：回測顯示 S6 平均需 ~14 檔，上限 10 時回撤
+                          # 由 −8% 惡化到 −14%，放寬到 15 才回到合理分散度
 WIN_RATE_PAUSE_THR = 0.28 # 近 20 筆勝率低於此值 → 發出暫停警告
 
 SIGNAL_LOG = "reports/signal_log.csv"  # 每日訊號歷史紀錄
@@ -254,7 +256,7 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
             "<i>⚠️ regime-conditional，勝率僅 ~38%（少數大贏家拉抬）</i>",
             "<i>⚠️ 部位應比主力小（建議 S4 的 1/2 ~ 2/3）</i>\n",
         ]
-        for _, row in growth_df.head(MAX_POSITIONS).iterrows():
+        for _, row in growth_df.head(MAX_POSITIONS_S6).iterrows():
             emoji = MARKET_EMOJI.get(row.get("market", "TWSE"), "⚪")
             sid   = row["stock_id"]
             close = row.get("close", "—")
