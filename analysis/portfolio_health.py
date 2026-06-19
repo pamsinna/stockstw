@@ -124,10 +124,19 @@ def check_one(stock_id: str, entry_date: str | None, entry_price: float) -> dict
     actions = []
     severity = "✅ 繼續持有"
 
-    # 🚨 立即減碼類
+    # 跌破停損：外資若仍買超 → 矛盾（價格說砍、籌碼說接），降為提醒讓你判斷；
+    #          外資也在賣 → 兩邊一致，維持 🚨 立即出。
     if pnl_pct <= SL_PCT * 100:
-        actions.append(f"🚨 跌破停損 {SL_PCT*100:.0f}%（虧損 {pnl_pct:.1f}%）")
-        severity = "🚨 立即出"
+        if f_10d > 0:
+            actions.append(
+                f"⚠️ 跌破停損 {SL_PCT*100:.0f}%（虧 {pnl_pct:.1f}%），但外資10日仍買超 "
+                f"{f_10d // 1000:,} 張 — 紀律砍 or 信籌碼凹單，你判斷"
+            )
+            if severity == "✅ 繼續持有":
+                severity = "⚠️ 觀察"
+        else:
+            actions.append(f"🚨 跌破停損 {SL_PCT*100:.0f}%（虧損 {pnl_pct:.1f}%）")
+            severity = "🚨 立即出"
 
     # Trailing 觸發
     if peak > entry_price * (1 + TRAIL_TRIGGER):
