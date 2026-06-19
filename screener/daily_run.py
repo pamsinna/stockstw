@@ -424,7 +424,11 @@ def run_daily(notify_fn=None) -> dict | None:
 
     # 訊號出場監控：記今日訊號 + 評估既有 open 訊號的籌碼出場（論點破壞才提醒）
     try:
-        from notify.exit_monitor import record_today, evaluate
+        from notify.exit_monitor import record_today, evaluate, _load
+        if _load().empty:   # 首次上線：自動回填近 20 交易日，之後每日累積維護
+            logger.info("Exit monitor: empty state → seeding last 20 trading days...")
+            from scripts.seed_open_signals import seed
+            seed(20)
         record_today(signals, today)
         signals["exits"] = evaluate(today)
     except Exception as e:
