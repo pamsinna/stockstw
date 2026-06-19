@@ -1,0 +1,58 @@
+"""出場監控 classify 純函式測試（論點破壞才通知）。"""
+from notify.exit_monitor import classify
+
+
+def aqs(score=70, dim4=10, dim1=14, stage="🟡 中期"):
+    return {"score": score, "dim4_inst_price_align": dim4,
+            "dim1_volprice": dim1, "stage": stage}
+
+
+def test_foreign_distribution_to_retail_exits():
+    lvl, r = classify(aqs(), foreign_10d=-3_000_000, inst_5d=0, retail_rising=True)
+    assert lvl == "🚨 出場" and "外資" in r[0]
+
+
+def test_foreign_redflag_dim4_exits():
+    lvl, _ = classify(aqs(dim4=-20), foreign_10d=-2_000_000, inst_5d=0, retail_rising=False)
+    assert lvl == "🚨 出場"
+
+
+def test_foreign_sell_without_retail_or_redflag_holds():
+    # 外資賣超但散戶沒接手、dim4 正常 → 不算倒貨
+    lvl, _ = classify(aqs(dim4=10), foreign_10d=-3_000_000, inst_5d=0, retail_rising=False)
+    assert lvl != "🚨 出場"
+
+
+def test_distribution_stage_exits():
+    lvl, _ = classify(aqs(stage="⚫ 派發中段"), 0, 0, False)
+    assert lvl == "🚨 出場"
+
+
+def test_trap_low_score_negative_dim4_exits():
+    lvl, _ = classify(aqs(score=45, dim4=-10, stage="🔴 末段"), 0, 0, False)
+    assert lvl == "🚨 出場"
+
+
+def test_weak_buying_power_warns():
+    lvl, r = classify(aqs(dim1=5), 0, 0, False)
+    assert lvl == "⚠️ 注意" and "買力" in r[0]
+
+
+def test_inst_5d_sell_threshold():
+    assert classify(aqs(), 0, -1_000_000, False)[0] == "⚠️ 注意"   # 大賣超 → ⚠️
+    assert classify(aqs(), 0, -100_000, False)[0] == "✅ 持有"      # 零星 → 不觸發
+
+
+def test_late_stage_alone_does_not_warn():
+    # 末段但買力正常 → 不通知（末段不算買力減弱）
+    lvl, _ = classify(aqs(stage="🔴 末段", dim1=14), 0, 0, False)
+    assert lvl == "✅ 持有"
+
+
+def test_healthy_holds():
+    lvl, r = classify(aqs(78, 15, 14, "🟢 早期累積"), 800_000, 300_000, False)
+    assert lvl == "✅ 持有" and r == []
+
+
+def test_none_aqs_does_not_crash():
+    assert classify(None, None, None, False)[0] == "✅ 持有"

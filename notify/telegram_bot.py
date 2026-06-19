@@ -133,6 +133,23 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
     )
     messages.append(header)
 
+    # ── 📤 訊號出場/注意（系統發過進場訊號者，籌碼惡化才提醒；非個人持股）──
+    exits_df = signals.get("exits", pd.DataFrame())
+    if isinstance(exits_df, pd.DataFrame) and not exits_df.empty:
+        order = {"🚨 出場": 0, "⚠️ 注意": 1}
+        exits_df = (exits_df.assign(_o=exits_df["level"].map(lambda x: order.get(x, 2)))
+                    .sort_values("_o"))
+        e_lines = ["📤 <b>訊號出場/注意</b>（系統發過進場訊號者，籌碼惡化才提醒）"]
+        for _, r in exits_df.iterrows():
+            sid = str(r["stock_id"])
+            nm = r.get("name") or names.get(sid, "")
+            e_lines.append(
+                f"{r['level']} <b>{sid} {nm}</b>（{r['strategy']}）  "
+                f"進場 {r['entry_date']} @{r['entry_price']:.1f} → 今 {r['close']:.1f}"
+                f"（{r['pnl_pct']:+.1f}%）\n  {r['reason']}"
+            )
+        messages.append("\n".join(e_lines))
+
     # ── 🎯 高信心：S4 ∩ S7 兩月內交集 ─────────────────────────────────────
     if not combo_df.empty:
         c_lines = [

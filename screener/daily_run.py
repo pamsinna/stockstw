@@ -421,6 +421,14 @@ def run_daily(notify_fn=None) -> dict | None:
     signals = screen_today(universe)
 
     today = datetime.now(_TZ).strftime("%Y-%m-%d")
+
+    # 訊號出場監控：記今日訊號 + 評估既有 open 訊號的籌碼出場（論點破壞才提醒）
+    try:
+        from notify.exit_monitor import record_today, evaluate
+        record_today(signals, today)
+        signals["exits"] = evaluate(today)
+    except Exception as e:
+        logger.warning(f"Exit monitor failed: {e}")
     for tf, df in signals.items():
         n = len(df)
         logger.info(f"[{tf}] {n} signals today")

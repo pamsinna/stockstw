@@ -564,6 +564,26 @@ def load_shareholding(stock_id: str, start: str = "2018-01-01") -> pd.DataFrame:
     return df
 
 
+# ─── 訊號出場監控狀態（存 DB 才能跨 CI run 持久化）──────────────────────────────
+
+def load_open_signals() -> pd.DataFrame:
+    """讀取出場監控的追蹤狀態（表不存在則回空）。"""
+    with _conn() as con:
+        try:
+            df = pd.read_sql("SELECT * FROM open_signals", con)
+        except Exception:
+            return pd.DataFrame()
+    if not df.empty and "stock_id" in df.columns:
+        df["stock_id"] = df["stock_id"].astype(str)
+    return df
+
+
+def save_open_signals(df: pd.DataFrame) -> None:
+    """整表覆寫追蹤狀態。"""
+    with _conn() as con:
+        df.to_sql("open_signals", con, if_exists="replace", index=False)
+
+
 def last_shareholding_date() -> str | None:
     with _conn() as con:
         row = con.execute(
