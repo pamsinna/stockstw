@@ -20,9 +20,10 @@ from pathlib import Path
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from data.cache import init_db, load_prices, load_institutional
+from data.cache import init_db, load_prices, load_institutional, load_shareholding
 from data.universe import build_universe
 from analysis.aqs import compute_aqs
+from notify.exit_monitor import SELLDAYS_MIN, FOREIGN_SELL_10D  # 共用「持續撤離」門檻
 
 _TZ = ZoneInfo("Asia/Taipei")
 
@@ -97,8 +98,19 @@ def check_one(stock_id: str, entry_date: str | None, entry_price: float) -> dict
         inst_10d = int(inst_df.tail(10)["all"].sum())
         inst_30d = int(inst_df.tail(30)["all"].sum())
         f_5d = int(inst_df.tail(5)["foreign_"].sum())
+        f_10 = inst_df.tail(10)["foreign_"].fillna(0)
+        f_10d = int(f_10.sum())
+        foreign_selldays = int((f_10 < 0).sum())   # 近10日外資賣超天數（持續性）
     else:
         inst_1d = inst_3d = inst_5d = inst_10d = inst_30d = f_5d = 0
+        f_10d = foreign_selldays = 0
+
+    # 散戶接手？（TDCC 週報，散戶比例上升）
+    sh = load_shareholding(stock_id, start="2025-01-01")
+    retail_rising = (not sh.empty and len(sh) >= 2 and "retail_pct" in sh and
+                     float(sh.sort_values("date")["retail_pct"].iloc[-1]) >
+                     float(sh.sort_values("date")["retail_pct"].iloc[0]))
+    dim4 = aqs.get("dim4_inst_price_align")
 
     # 趨勢面：跌破 MA60？
     if len(price_df) >= 60:
@@ -133,6 +145,15 @@ def check_one(stock_id: str, entry_date: str | None, entry_price: float) -> dict
 
     if inst_5d < INST_SELL_5D_DANGER:
         actions.append(f"🚨 近 5 日三大賣超 {inst_5d:,}（門檻 {INST_SELL_5D_DANGER:,}）")
+        if severity == "✅ 繼續持有":
+            severity = "🚨 立即減碼"
+
+    # 🚨 資金「持續」撤離：近10日外資賣超天數≥門檻 + 大幅（非單日事件）+ 散戶接手/紅旗
+    if (foreign_selldays >= SELLDAYS_MIN and f_10d <= FOREIGN_SELL_10D
+            and (retail_rising or (dim4 is not None and dim4 < 0))):
+        why = "散戶接手" if retail_rising else "AQS紅旗"
+        actions.append(f"🚨 資金持續撤離（近10日 {foreign_selldays} 天賣、外資賣超 "
+                       f"{abs(f_10d) // 1000:,} 張、{why}）")
         if severity == "✅ 繼續持有":
             severity = "🚨 立即減碼"
 
