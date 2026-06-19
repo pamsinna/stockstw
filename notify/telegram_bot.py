@@ -92,6 +92,23 @@ def _name_map() -> dict[str, str]:
         return {}
 
 
+def _aqs_plain(score: float, stage: str) -> str:
+    """AQS 分數+階段 → 一句白話判讀（不露數字/階段詞）。"""
+    if pd.isna(score):
+        return ""
+    if score >= 70:
+        if "早期" in stage:
+            return "✅ 真累積，進場好時機"
+        if "末段" in stage:
+            return "⚠️ 已經漲一段，要進就減半"
+        return "✅ 真累積，可進但別追高"      # 中期/其他高分
+    if score >= 50:
+        return "🟡 不夠強，別主動追"
+    if "派發" in stage:
+        return "🚫 可能在騙散戶，千萬不要追"
+    return "🚫 籌碼很差，避開"
+
+
 def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
     """
     只主推策略四（中長線）。
@@ -163,19 +180,15 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
             f60   = row.get("f_60d", float("nan"))
             t60   = row.get("t_60d", float("nan"))
             inst60 = (0 if pd.isna(f60) else f60) + (0 if pd.isna(t60) else t60)
-            inst_str = f"+{int(inst60//1000)}張" if inst60 > 0 else f"{int(inst60//1000)}張"
+            inst_str = f"+{int(inst60//1000):,}張" if inst60 > 0 else f"{int(inst60//1000):,}張"
             name = names.get(sid, "")
             s4_today = row.get("s4_today", False)
             s7_today = row.get("s7_today", False)
             trigger = "今日 S4+S7" if s4_today and s7_today else ("今日 S4" if s4_today else "今日 S7")
-            aqs = row.get("aqs_score", float("nan"))
-            stage = row.get("aqs_stage", "")
-            verdict = row.get("aqs_verdict", "")
-            aqs_line = (f"\n  AQS {aqs:.0f}  {stage}  {verdict}"
-                        if not pd.isna(aqs) else "")
+            plain = _aqs_plain(row.get("aqs_score", float("nan")), row.get("aqs_stage", ""))
+            sub = f"{trigger} · {plain}" if plain else trigger
             c_lines.append(
-                f"{emoji} <b>{sid} {name}</b>  ${close}  {trigger}  法人60日{inst_str}"
-                f"{aqs_line}"
+                f"{emoji} <b>{sid} {name}</b>  ${close}  法人60日{inst_str}\n  {sub}"
             )
         messages.append("\n".join(c_lines))
 
@@ -203,27 +216,16 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
             emoji = MARKET_EMOJI.get(row.get("market", "TWSE"), "⚪")
             sid   = row["stock_id"]
             close = row.get("close", "—")
-            kd    = row.get("kd_k", 0)
-            rsi   = row.get("rsi", 0)
-            bb    = row.get("bb_pct", float("nan"))
-            per   = row.get("per", float("nan"))
             f60   = row.get("f_60d", float("nan"))
             t60   = row.get("t_60d", float("nan"))
-            bb_str  = f"{bb*100:.0f}%" if not pd.isna(bb) else "—"
-            per_str = f"{per:.0f}" if not pd.isna(per) and per > 0 else "—"
             inst60  = (0 if pd.isna(f60) else f60) + (0 if pd.isna(t60) else t60)
-            inst_str = f"+{int(inst60//1000)}張" if inst60 > 0 else f"{int(inst60//1000)}張"
+            inst_str = f"+{int(inst60//1000):,}張" if inst60 > 0 else f"{int(inst60//1000):,}張"
             name = names.get(sid, "")
-            aqs = row.get("aqs_score", float("nan"))
-            stage = row.get("aqs_stage", "")
-            verdict = row.get("aqs_verdict", "")
-            aqs_line = (f"  AQS {aqs:.0f}  {stage}  {verdict}"
-                        if not pd.isna(aqs) else "")
-            lines.append(
-                f"{emoji} <b>{sid} {name}</b>  ${close}  "
-                f"BB{bb_str}  KD{kd:.0f}  RSI{rsi:.0f}  本益比{per_str}  法人60日{inst_str}"
-                f"{aqs_line}"
-            )
+            plain = _aqs_plain(row.get("aqs_score", float("nan")), row.get("aqs_stage", ""))
+            line = f"{emoji} <b>{sid} {name}</b>  ${close}  法人60日{inst_str}"
+            if plain:
+                line += f"\n  {plain}"
+            lines.append(line)
         messages.append("\n".join(lines))
         _append_signal_log(long_df, date)
 
@@ -245,18 +247,14 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
             emoji = MARKET_EMOJI.get(row.get("market", "TWSE"), "⚪")
             sid   = row["stock_id"]
             close = row.get("close", "—")
-            rsi   = row.get("rsi", 0)
-            per   = row.get("per", float("nan"))
             yoy   = row.get("revenue_yoy", float("nan"))
             f20   = row.get("f_20d", float("nan"))
-            per_str = f"{per:.0f}" if not pd.isna(per) and per > 0 else "—"
             yoy_str = f"+{yoy:.0f}%" if not pd.isna(yoy) else "—"
             f20_val = 0 if pd.isna(f20) else f20
-            f20_str = f"+{int(f20_val//1000)}張" if f20_val > 0 else f"{int(f20_val//1000)}張"
+            f20_str = f"+{int(f20_val//1000):,}張" if f20_val > 0 else f"{int(f20_val//1000):,}張"
             name = names.get(sid, "")
             rev_lines.append(
-                f"{emoji} <b>{sid} {name}</b>  ${close}  "
-                f"RSI{rsi:.0f}  YoY{yoy_str}  本益比{per_str}  外資20日{f20_str}"
+                f"{emoji} <b>{sid} {name}</b>  ${close}  營收年增{yoy_str}  外資20日{f20_str}"
             )
         messages.append("\n".join(rev_lines))
 
@@ -277,24 +275,16 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
             emoji = MARKET_EMOJI.get(row.get("market", "TWSE"), "⚪")
             sid   = row["stock_id"]
             close = row.get("close", "—")
-            rsi   = row.get("rsi", 0)
             f60   = row.get("f_60d", float("nan"))
             t60   = row.get("t_60d", float("nan"))
-            vol_r = row.get("vol_ratio", float("nan"))
             inst60 = (0 if pd.isna(f60) else f60) + (0 if pd.isna(t60) else t60)
-            inst_str = f"+{int(inst60//1000)}張" if inst60 > 0 else f"{int(inst60//1000)}張"
-            vol_s = f"{vol_r:.1f}x" if not pd.isna(vol_r) else "—"
+            inst_str = f"+{int(inst60//1000):,}張" if inst60 > 0 else f"{int(inst60//1000):,}張"
             name = names.get(sid, "")
-            aqs = row.get("aqs_score", float("nan"))
-            stage = row.get("aqs_stage", "")
-            verdict = row.get("aqs_verdict", "")
-            aqs_line = (f"\n  AQS {aqs:.0f}  {stage}  {verdict}"
-                        if not pd.isna(aqs) else "")
-            g_lines.append(
-                f"{emoji} <b>{sid} {name}</b>  ${close}  "
-                f"RSI{rsi:.0f}  量{vol_s}  法人60日{inst_str}"
-                f"{aqs_line}"
-            )
+            plain = _aqs_plain(row.get("aqs_score", float("nan")), row.get("aqs_stage", ""))
+            line = f"{emoji} <b>{sid} {name}</b>  ${close}  法人60日{inst_str}"
+            if plain:
+                line += f"\n  {plain}"
+            g_lines.append(line)
         messages.append("\n".join(g_lines))
 
     # ── 策略七：累積前夕（狙擊手型，每年 ~70 筆訊號）──────────────────────
@@ -330,19 +320,15 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
             f60   = row.get("f_60d", float("nan"))
             t60   = row.get("t_60d", float("nan"))
             inst60 = (0 if pd.isna(f60) else f60) + (0 if pd.isna(t60) else t60)
-            inst_str = f"+{int(inst60//1000)}張" if inst60 > 0 else f"{int(inst60//1000)}張"
-            aqs = row.get("aqs_score", float("nan"))
-            stage = row.get("aqs_stage", "")
-            verdict = row.get("aqs_verdict", "")
-            aqs_line = (f"\n  AQS {aqs:.0f}  {stage}  {verdict}"
-                        if not pd.isna(aqs) else "")
+            inst_str = f"+{int(inst60//1000):,}張" if inst60 > 0 else f"{int(inst60//1000):,}張"
             name = names.get(sid, "")
+            plain = _aqs_plain(row.get("aqs_score", float("nan")), row.get("aqs_stage", ""))
             # ⚡ 標籤：close > MA20（基於失敗分析：勝率 66%→72%）
             tag = "⚡ " if row.get("above_ma20", False) else "  "
-            a_lines.append(
-                f"{tag}{emoji} <b>{sid} {name}</b>  ${close}  法人60日{inst_str}"
-                f"{aqs_line}"
-            )
+            line = f"{tag}{emoji} <b>{sid} {name}</b>  ${close}  法人60日{inst_str}"
+            if plain:
+                line += f"\n  {plain}"
+            a_lines.append(line)
         messages.append("\n".join(a_lines))
 
     # ── 執行紀律提醒 ──────────────────────────────────────────────────────
