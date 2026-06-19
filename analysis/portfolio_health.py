@@ -210,6 +210,8 @@ def check_one(stock_id: str, entry_date: str | None, entry_price: float) -> dict
         "inst_10d": inst_10d,
         "inst_30d": inst_30d,
         "f_5d": f_5d,
+        "f_10d": f_10d,
+        "foreign_selldays": foreign_selldays,
         "below_ma60": below_ma60,
         "ma60": ma60,
         "actions": actions,
@@ -253,6 +255,11 @@ def format_report(results: list[dict], name_map: dict) -> str:
             lines.append(
                 f"    法人 1d {r['inst_1d']:+,}  3d {r['inst_3d']:+,}  "
                 f"5d {r['inst_5d']:+,}  10d {r['inst_10d']:+,}  30d {r['inst_30d']:+,}"
+            )
+            # 持續撤離的「真正判斷基準」：外資10日淨額 + 賣超天數（避免被三大法人單日數字嚇到）
+            lines.append(
+                f"    外資10日 {r.get('f_10d', 0) // 1000:+,} 張"
+                f"（賣 {r.get('foreign_selldays', 0)}/10 日）← 撤離判斷基準"
             )
             if r["actions"]:
                 for a in r["actions"]:
