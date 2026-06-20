@@ -373,6 +373,49 @@ def fetch_all_monthly_revenue() -> pd.DataFrame:
     return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
 
 
+# ─── 美國信用壓力溫度（HY OAS，FRED 免費）──────────────────────────────────────
+# 固收領先股市：信用利差「擴大」是 risk-off 的領先溫度。當提醒看、非機械避險。
+
+def fetch_hy_oas() -> pd.Series:
+    """ICE BofA US 高收益債利差 OAS（%）— FRED 免費 CSV。失敗回空 Series。"""
+    try:
+        r = _session.get("https://fred.stlouisfed.org/graph/fredgraph.csv",
+                         params={"id": "BAMLH0A0HYM2"}, timeout=20)
+        r.raise_for_status()
+        d = pd.read_csv(io.StringIO(r.text), na_values=["."])
+        d.columns = ["date", "v"]
+        d["date"] = pd.to_datetime(d["date"])
+        return d.dropna().set_index("date")["v"]
+    except Exception as e:
+        logger.warning(f"fetch_hy_oas failed: {e}")
+        return pd.Series(dtype=float)
+
+
+def us_credit_stress_summary() -> str:
+    """一行「美國信用壓力」溫度（含絕對分級 + 月內擴大警訊）。"""
+    s = fetch_hy_oas()
+    if s.empty:
+        return ""
+    cur = float(s.iloc[-1])
+    if cur < 3.5:
+        band = "🟢 偏低"
+    elif cur < 5.0:
+        band = "🟡 中性"
+    elif cur < 7.0:
+        band = "🟠 偏高，留意"
+    else:
+        band = "🔴 警戒，建議縮手"
+    mo = s[s.index <= s.index[-1] - pd.Timedelta(days=30)]
+    trend = ""
+    if not mo.empty:
+        chg = cur - float(mo.iloc[-1])
+        if chg >= 0.5:
+            trend = f"，月內擴大 +{chg:.1f}（⚠️ 警訊）"
+        elif chg <= -0.5:
+            trend = f"，月內收斂 {chg:.1f}"
+    return f"🌡 美國信用壓力(HY OAS)：{cur:.2f}%  {band}{trend}"
+
+
 def fetch_stock_list_finmind() -> pd.DataFrame:
     """FinMind 股票清單（含興櫃）"""
     params = {"dataset": "TaiwanStockInfo", "token": FINMIND_TOKEN}

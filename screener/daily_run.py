@@ -433,6 +433,16 @@ def run_daily(notify_fn=None) -> dict | None:
         signals["exits"] = evaluate(today)
     except Exception as e:
         logger.warning(f"Exit monitor failed: {e}")
+
+    # 美國信用壓力溫度（FRED HY OAS）→ 塞進 _meta 給通知顯示（固收領先股市的 risk-off 溫度）
+    try:
+        from data.fetcher import us_credit_stress_summary
+        cs = us_credit_stress_summary()
+        if cs and "_meta" in signals and not signals["_meta"].empty:
+            signals["_meta"]["credit_stress"] = cs
+    except Exception as e:
+        logger.warning(f"Credit stress fetch failed: {e}")
+
     for tf, df in signals.items():
         n = len(df)
         logger.info(f"[{tf}] {n} signals today")

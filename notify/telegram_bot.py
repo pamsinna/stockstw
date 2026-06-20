@@ -128,6 +128,8 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
                     if not meta_df.empty and "regime_label" in meta_df.columns else "")
     regime_ret = (meta_df.iloc[0]["regime_60d_return"]
                   if not meta_df.empty and "regime_60d_return" in meta_df.columns else 0.0)
+    credit_stress = (meta_df.iloc[0]["credit_stress"]
+                     if not meta_df.empty and "credit_stress" in meta_df.columns else "")
 
     # 超過 10 支時按市值代理排序（收盤價 × 成交量 ≈ 當日成交金額）
     # vol_ratio 是策略一的條件，對策略四的 alpha 來源無關；
@@ -143,10 +145,11 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
     # ── Header ────────────────────────────────────────────────────────────
     regime_line = (f"\n大盤 regime：{regime_label}（0050 60日 {regime_ret*100:+.1f}%）"
                    if regime_label else "")
+    credit_line = f"\n{credit_stress}" if credit_stress else ""
     header = (
         f"📊 <b>台股選股報告 {date}</b>\n"
         f"主力訊號（中長線）：{len(long_df)} 支"
-        f"{regime_line}"
+        f"{regime_line}{credit_line}"
     )
     messages.append(header)
 
