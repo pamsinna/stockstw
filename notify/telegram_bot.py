@@ -131,6 +131,22 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
     credit_stress = (meta_df.iloc[0]["credit_stress"]
                      if not meta_df.empty and "credit_stress" in meta_df.columns else "")
 
+    # 出場警告優先：出現在「📤 出場/注意」的股票，從進場區拿掉，避免同一檔又買又賣
+    exits_df = signals.get("exits", pd.DataFrame())
+    _exit_sids = (set(exits_df["stock_id"].astype(str))
+                  if isinstance(exits_df, pd.DataFrame) and not exits_df.empty
+                  and "stock_id" in exits_df.columns else set())
+    if _exit_sids:
+        def _drop_exits(df):
+            if not df.empty and "stock_id" in df.columns:
+                return df[~df["stock_id"].astype(str).isin(_exit_sids)].reset_index(drop=True)
+            return df
+        long_df = _drop_exits(long_df)
+        revenue_df = _drop_exits(revenue_df)
+        growth_df = _drop_exits(growth_df)
+        accum_df = _drop_exits(accum_df)
+        combo_df = _drop_exits(combo_df)
+
     # 超過 10 支時按市值代理排序（收盤價 × 成交量 ≈ 當日成交金額）
     # vol_ratio 是策略一的條件，對策略四的 alpha 來源無關；
     # 成交金額最大的流動性最穩，避免大部位卡在小型股

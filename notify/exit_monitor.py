@@ -146,6 +146,9 @@ def evaluate(date: str) -> pd.DataFrame:
     out = []
     for i, row in log[log.status == "open"].iterrows():
         sid = str(row["stock_id"])
+        # 今天剛記錄的訊號不評估出場（不可能同日進、同日出）
+        if (today - pd.Timestamp(row["entry_date"])).days < 1:
+            continue
         # 衛生：追蹤過久靜默移除
         if (today - pd.Timestamp(row["entry_date"])).days > AGE_OUT_DAYS:
             log.at[i, "status"] = "aged_out"

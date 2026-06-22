@@ -66,3 +66,21 @@ def test_healthy_holds():
 
 def test_none_aqs_does_not_crash():
     assert classify(None, None, None, None, False)[0] == "✅ 持有"
+
+
+def test_exit_dedup_removes_stock_from_entry_section():
+    """同一檔出現在出場區時，不該又出現在進場區（修義隆「又買又賣」bug）。"""
+    import pandas as pd
+    from notify.telegram_bot import format_signals
+    long_df = pd.DataFrame([{"stock_id": "2458", "close": 178.5, "f_60d": 1_000_000,
+                             "t_60d": 0, "market": "TWSE", "aqs_score": 81,
+                             "aqs_stage": "🔴 末段"}])
+    exits = pd.DataFrame([{"level": "🚨 出場", "stock_id": "2458", "name": "義隆",
+                           "strategy": "S7", "entry_date": "2026-06-10",
+                           "entry_price": 150.0, "close": 178.5, "pnl_pct": 19.0,
+                           "reason": "派發"}])
+    meta = pd.DataFrame([{"regime_label": "多頭", "regime_60d_return": 0.1}])
+    msgs = format_signals({"long": long_df, "exits": exits, "_meta": meta}, "2026-06-22")
+    long_section = [m for m in msgs if "中長線" in m]
+    assert all("2458" not in m for m in long_section)   # 進場區沒有 2458
+    assert any("📤" in m and "2458" in m for m in msgs)  # 出場區有 2458
