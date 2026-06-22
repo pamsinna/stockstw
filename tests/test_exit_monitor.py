@@ -84,3 +84,20 @@ def test_exit_dedup_removes_stock_from_entry_section():
     long_section = [m for m in msgs if "中長線" in m]
     assert all("2458" not in m for m in long_section)   # 進場區沒有 2458
     assert any("📤" in m and "2458" in m for m in msgs)  # 出場區有 2458
+
+
+def test_warn_does_not_suppress_entry():
+    """⚠️ 注意 是 heads-up，不把股票從進場區拿掉（避免太嚴格、誤殺健康新訊號）。"""
+    import pandas as pd
+    from notify.telegram_bot import format_signals
+    long_df = pd.DataFrame([{"stock_id": "2458", "close": 178.5, "f_60d": 1_000_000,
+                             "t_60d": 0, "market": "TWSE", "aqs_score": 81,
+                             "aqs_stage": "🟡 中期"}])
+    exits = pd.DataFrame([{"level": "⚠️ 注意", "stock_id": "2458", "name": "義隆",
+                           "strategy": "S7", "entry_date": "2026-06-10",
+                           "entry_price": 150.0, "close": 178.5, "pnl_pct": 19.0,
+                           "reason": "買力轉弱"}])
+    meta = pd.DataFrame([{"regime_label": "多頭", "regime_60d_return": 0.1}])
+    msgs = format_signals({"long": long_df, "exits": exits, "_meta": meta}, "2026-06-22")
+    long_section = [m for m in msgs if "中長線" in m]
+    assert any("2458" in m for m in long_section)   # ⚠️ 不 suppress，進場區仍有

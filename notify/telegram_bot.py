@@ -131,11 +131,11 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
     credit_stress = (meta_df.iloc[0]["credit_stress"]
                      if not meta_df.empty and "credit_stress" in meta_df.columns else "")
 
-    # 出場警告優先：出現在「📤 出場/注意」的股票，從進場區拿掉，避免同一檔又買又賣
+    # 只有「🚨 出場」才從進場區拿掉（真矛盾：又買又賣）；「⚠️ 注意」是 heads-up，可共存
     exits_df = signals.get("exits", pd.DataFrame())
-    _exit_sids = (set(exits_df["stock_id"].astype(str))
+    _exit_sids = (set(exits_df[exits_df["level"].astype(str).str.contains("出場")]["stock_id"].astype(str))
                   if isinstance(exits_df, pd.DataFrame) and not exits_df.empty
-                  and "stock_id" in exits_df.columns else set())
+                  and {"stock_id", "level"} <= set(exits_df.columns) else set())
     if _exit_sids:
         def _drop_exits(df):
             if not df.empty and "stock_id" in df.columns:
