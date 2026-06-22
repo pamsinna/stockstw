@@ -23,7 +23,10 @@ from zoneinfo import ZoneInfo
 from data.cache import init_db, load_prices, load_institutional, load_shareholding
 from data.universe import build_universe
 from analysis.aqs import compute_aqs
-from notify.exit_monitor import SELLDAYS_MIN, FOREIGN_SELL_10D  # 共用「持續撤離」門檻
+from notify.exit_monitor import (  # 共用「持續撤離」門檻 + 量測
+    SELLDAYS_MIN, FOREIGN_SELL_10D, FOREIGN_SELL_10D_RATIO, SELL_RATIO_5D,
+    retail_rising_recent,
+)
 
 _TZ = ZoneInfo("Asia/Taipei")
 
@@ -33,7 +36,8 @@ TRAIL_PCT          = -0.15   # trailing：從峰值跌 15%
 TRAIL_TRIGGER      = 0.20    # 漲到 +20% 才啟動 trailing
 AQS_DANGER         = 40      # AQS < 40 強烈警告
 AQS_WARN           = 60      # AQS < 60 觀察
-INST_SELL_5D_DANGER = -1_000_000   # 近 5 日三大法人賣超 < -1M 強烈警告
+AQS_HEALTHY        = 70      # AQS ≥ 70 結構仍健康 → 撤離視為獲利了結，降為觀察
+INST_SELL_5D_FLOOR = -1_000_000    # 近 5 日(外資+投信)賣超絕對下限（=1,000 張，濾薄量股噪音）
 INST_SELL_10D_WARN  = -2_000_000   # 近 10 日 < -2M 觀察
 
 
@@ -86,7 +90,8 @@ def check_one(stock_id: str, entry_date: str | None, entry_price: float) -> dict
     # AQS
     aqs = compute_aqs(stock_id) or {}
 
-    # 法人近 1 / 3 / 5 / 10 / 30 日
+    # 法人近 1 / 3 / 5 / 10 / 30 日（顯示用三大合計；判斷用 conv=外資+投信，排除自營商避險雜訊）
+    conv_5d = vol_5d = vol_10d = 0
     if not inst_df.empty:
         inst_df = inst_df.sort_values("date")
         inst_df["all"] = (inst_df["foreign_"].fillna(0) +
@@ -101,15 +106,21 @@ def check_one(stock_id: str, entry_date: str | None, entry_price: float) -> dict
         f_10 = inst_df.tail(10)["foreign_"].fillna(0)
         f_10d = int(f_10.sum())
         foreign_selldays = int((f_10 < 0).sum())   # 近10日外資賣超天數（持續性）
+        # 判斷用：外資+投信（排除自營商），之後按成交量正規化
+        conv = inst_df["foreign_"].fillna(0) + inst_df["trust"].fillna(0)
+        conv_5d = int(conv.tail(5).sum())
+        vol_5d = float(price_df.sort_values("date")["volume"].tail(5).sum()) if "volume" in price_df else 0.0
+        vol_10d = float(price_df.sort_values("date")["volume"].tail(10).sum()) if "volume" in price_df else 0.0
     else:
         inst_1d = inst_3d = inst_5d = inst_10d = inst_30d = f_5d = 0
         f_10d = foreign_selldays = 0
 
-    # 散戶接手？（TDCC 週報，散戶比例上升）
-    sh = load_shareholding(stock_id, start="2025-01-01")
-    retail_rising = (not sh.empty and len(sh) >= 2 and "retail_pct" in sh and
-                     float(sh.sort_values("date")["retail_pct"].iloc[-1]) >
-                     float(sh.sort_values("date")["retail_pct"].iloc[0]))
+    # 量能正規化比例（None = 無量資料，後續用絕對 floor）
+    ratio_5d = conv_5d / vol_5d if vol_5d else None
+    ratio_10d = f_10d / vol_10d if vol_10d else None
+
+    # 散戶接手？（TDCC 週報，近月散戶比例明顯上升才算；修掉舊版微幅噪音誤判）
+    retail_rising = retail_rising_recent(load_shareholding(stock_id, start="2025-01-01"))
     dim4 = aqs.get("dim4_inst_price_align")
 
     # 趨勢面：跌破 MA60？
@@ -123,6 +134,12 @@ def check_one(stock_id: str, entry_date: str | None, entry_price: float) -> dict
     # 賣出規則
     actions = []
     severity = "✅ 繼續持有"
+    hard_danger = False   # 派發/持續撤離/重賣 → 結構性危險，單日反轉買不得據以降級
+
+    def _esc(level: str):
+        nonlocal severity
+        if severity == "✅ 繼續持有":
+            severity = level
 
     # 跌破停損：外資若仍買超 → 矛盾（價格說砍、籌碼說接），降為提醒讓你判斷；
     #          外資也在賣 → 兩邊一致，維持 🚨 立即出。
@@ -132,73 +149,87 @@ def check_one(stock_id: str, entry_date: str | None, entry_price: float) -> dict
                 f"⚠️ 跌破停損 {SL_PCT*100:.0f}%（虧 {pnl_pct:.1f}%），但外資10日仍買超 "
                 f"{f_10d // 1000:,} 張 — 紀律砍 or 信籌碼凹單，你判斷"
             )
-            if severity == "✅ 繼續持有":
-                severity = "⚠️ 觀察"
+            _esc("⚠️ 觀察")
         else:
             actions.append(f"🚨 跌破停損 {SL_PCT*100:.0f}%（虧損 {pnl_pct:.1f}%）")
             severity = "🚨 立即出"
+            hard_danger = True
 
-    # Trailing 觸發
+    # Trailing 觸發；進場日為估算時 peak 不可靠，降為提醒（不硬出）
     if peak > entry_price * (1 + TRAIL_TRIGGER):
         trail_level = peak * (1 + TRAIL_PCT)
         if current <= trail_level:
-            actions.append(f"🚨 trailing 觸發：峰值 {peak:.0f} 跌 15% 至 {trail_level:.0f}，現價 {current:.0f}")
-            severity = "🚨 立即出（鎖利）"
+            if is_estimated:
+                actions.append(f"⚠️ 疑似 trailing：峰值 {peak:.0f} 跌至 {trail_level:.0f}、現價 "
+                               f"{current:.0f}，但進場日為估算、峰值僅供參考")
+                _esc("⚠️ 觀察")
+            else:
+                actions.append(f"🚨 trailing 觸發：峰值 {peak:.0f} 跌 15% 至 {trail_level:.0f}，現價 {current:.0f}")
+                severity = "🚨 立即出（鎖利）"
+                hard_danger = True
 
     aqs_score = aqs.get("score")
-    if aqs_score is not None:
-        if aqs_score < AQS_DANGER:
-            actions.append(f"🚨 AQS {aqs_score:.0f} < {AQS_DANGER}（疑似派發/籌碼差）")
-            if severity == "✅ 繼續持有":
-                severity = "🚨 立即減碼"
+    if aqs_score is not None and aqs_score < AQS_DANGER:
+        actions.append(f"🚨 AQS {aqs_score:.0f} < {AQS_DANGER}（疑似派發/籌碼差）")
+        hard_danger = True
+        _esc("🚨 立即減碼")
 
-    if inst_5d < INST_SELL_5D_DANGER:
-        actions.append(f"🚨 近 5 日三大賣超 {inst_5d:,}（門檻 {INST_SELL_5D_DANGER:,}）")
-        if severity == "✅ 繼續持有":
-            severity = "🚨 立即減碼"
+    # 持續撤離：近10日外資賣超天數≥門檻 + 大幅（量能正規化 + 絕對 floor）+ 散戶接手/紅旗
+    sustained = (foreign_selldays >= SELLDAYS_MIN and f_10d <= FOREIGN_SELL_10D
+                 and (ratio_10d is None or ratio_10d <= FOREIGN_SELL_10D_RATIO)
+                 and (retail_rising or (dim4 is not None and dim4 < 0)))
+    # 5日(外資+投信)重賣：量能比 ≤ -10% 且絕對額過 floor（兩者都要，免薄量股/大型股誤判）
+    heavy_5d = (conv_5d <= INST_SELL_5D_FLOOR
+                and (ratio_5d is None or ratio_5d <= SELL_RATIO_5D))
 
-    # 🚨 資金「持續」撤離：近10日外資賣超天數≥門檻 + 大幅（非單日事件）+ 散戶接手/紅旗
-    if (foreign_selldays >= SELLDAYS_MIN and f_10d <= FOREIGN_SELL_10D
-            and (retail_rising or (dim4 is not None and dim4 < 0))):
+    if sustained:
         why = "散戶接手" if retail_rising else "AQS紅旗"
-        actions.append(f"🚨 資金持續撤離（近10日 {foreign_selldays} 天賣、外資賣超 "
-                       f"{abs(f_10d) // 1000:,} 張、{why}）")
-        if severity == "✅ 繼續持有":
-            severity = "🚨 立即減碼"
+        amt = (f"佔10日量 {ratio_10d:.0%}" if ratio_10d is not None
+               else f"外資賣 {abs(f_10d)//1000:,} 張")
+        # AQS 仍健康 + 未破 MA60 → 視為獲利了結/輪動，降為觀察（不無腦壓過高 AQS）
+        if aqs_score is not None and aqs_score >= AQS_HEALTHY and not below_ma60:
+            actions.append(f"⚠️ 外資連續調節（近10日 {foreign_selldays} 天賣、{amt}），"
+                           f"但 AQS {aqs_score:.0f} 結構仍健康、未破 MA60 — 像獲利了結，留意即可")
+            _esc("⚠️ 觀察")
+        else:
+            actions.append(f"🚨 資金持續撤離（近10日 {foreign_selldays} 天賣、{amt}、{why}）")
+            hard_danger = True
+            _esc("🚨 立即減碼")
+    elif heavy_5d:   # 持續撤離已涵蓋重賣，僅在它沒觸發時才單獨報（非持續 → 中度）
+        amt = f"佔5日量 {ratio_5d:.0%}" if ratio_5d is not None else f"{conv_5d//1000:,} 張"
+        actions.append(f"⚠️ 近5日外資+投信重賣（{conv_5d//1000:,} 張、{amt}）— 非持續，觀察是否續賣")
+        _esc("⚠️ 觀察減碼")
 
-    # ⚠️ 觀察減碼類
+    # ⚠️ 觀察類
     if aqs_score is not None and AQS_DANGER <= aqs_score < AQS_WARN:
         actions.append(f"⚠️ AQS {aqs_score:.0f} 偏低（< {AQS_WARN}）")
-        if severity == "✅ 繼續持有":
-            severity = "⚠️ 觀察"
+        _esc("⚠️ 觀察")
 
-    if INST_SELL_5D_DANGER <= inst_5d < 0 and inst_10d < INST_SELL_10D_WARN:
-        actions.append(f"⚠️ 法人近期轉賣（5d {inst_5d:,}, 10d {inst_10d:,}）")
-        if severity == "✅ 繼續持有":
-            severity = "⚠️ 觀察"
+    # 中度賣壓：外資+投信佔量 -5%~-10% 且 10日累積轉弱（heavy_5d 已涵蓋更重的，不重複）
+    if (not heavy_5d and ratio_5d is not None and FOREIGN_SELL_10D_RATIO >= ratio_5d > SELL_RATIO_5D
+            and inst_10d < INST_SELL_10D_WARN):
+        actions.append(f"⚠️ 法人近期轉賣（5d外資投信 {conv_5d:,}、佔量 {ratio_5d:.0%}, 10d三大 {inst_10d:,}）")
+        _esc("⚠️ 觀察")
 
     if below_ma60:
         actions.append(f"⚠️ 跌破 MA60（{ma60:.0f}）")
-        if severity == "✅ 繼續持有":
-            severity = "⚠️ 觀察"
+        _esc("⚠️ 觀察")
 
     # AQS verdict 有「派發 trap」
     aqs_verdict = aqs.get("verdict", "")
     if "trap" in aqs_verdict:
         actions.append(f"⚠️ AQS verdict: {aqs_verdict}")
-        if severity == "✅ 繼續持有":
-            severity = "⚠️ 觀察減碼"
+        _esc("⚠️ 觀察減碼")
 
-    # 反轉跡象：近期轉買但 5d 或 10d 仍負（避免誤判剛開始買的）
-    # 條件：近 1 日強買 (>200K) AND 近 3 日合計仍正 AND (5d 或 10d 為負)
-    if (inst_1d > 200_000 and inst_3d > 0 and (inst_5d < 0 or inst_10d < 0)):
+    # 反轉跡象：近1日強買 + 近3日仍正，但 5d/10d 仍負 → 可能剛轉買
+    if inst_1d > 200_000 and inst_3d > 0 and (inst_5d < 0 or inst_10d < 0):
         actions.append(
             f"🔄 反轉跡象：近 1 日 +{inst_1d:,} / 近 3 日 +{inst_3d:,}，"
             f"但 5d {inst_5d:+,} / 10d {inst_10d:+,} — 可能剛轉買，多觀察 2-3 日"
         )
-        # 若原本因為 5d 賣超被列警告，降一級
-        if severity in ("🚨 立即減碼", "⚠️ 觀察"):
-            severity = "⚠️ 觀察減碼"  # 降為中度警告
+        # 僅在「沒有結構性危險」時才降級；派發/持續撤離下單日買不足採信，維持 🚨
+        if not hard_danger and severity in ("🚨 立即減碼", "⚠️ 觀察"):
+            severity = "⚠️ 觀察減碼"
 
     return {
         "stock_id": stock_id,

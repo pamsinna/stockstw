@@ -101,3 +101,29 @@ def test_warn_does_not_suppress_entry():
     msgs = format_signals({"long": long_df, "exits": exits, "_meta": meta}, "2026-06-22")
     long_section = [m for m in msgs if "中長線" in m]
     assert any("2458" in m for m in long_section)   # ⚠️ 不 suppress，進場區仍有
+
+
+def test_large_cap_small_ratio_not_sustained():
+    """大型股絕對賣超過 floor，但佔量比很小 → 不算持續撤離（修絕對門檻誤殺大型股）。"""
+    lvl, _ = classify(aqs(), foreign_10d=-5_000_000, foreign_selldays=7,
+                      inst_5d=0, retail_rising=True, foreign_10d_ratio=-0.008)
+    assert lvl != "🚨 出場"
+
+
+def test_sustained_with_heavy_ratio_exits():
+    """同樣絕對賣超，但佔量比夠大（≤ -5%）→ 真持續撤離。"""
+    lvl, _ = classify(aqs(), foreign_10d=-5_000_000, foreign_selldays=7,
+                      inst_5d=0, retail_rising=True, foreign_10d_ratio=-0.09)
+    assert lvl == "🚨 出場"
+
+
+def test_retail_rising_recent_filters_noise():
+    """散戶比例近月 +0.17pp 是噪音不算接手；+1.2pp 才算；資料不足回 False。"""
+    import pandas as pd
+    from notify.exit_monitor import retail_rising_recent
+    d = pd.date_range("2026-05-01", periods=5, freq="W")
+    noise = pd.DataFrame({"date": d, "retail_pct": [8.26, 8.28, 8.25, 8.45, 8.43]})
+    real = pd.DataFrame({"date": d, "retail_pct": [8.0, 8.3, 8.6, 8.9, 9.2]})
+    assert retail_rising_recent(noise) is False
+    assert retail_rising_recent(real) is True
+    assert retail_rising_recent(pd.DataFrame()) is False

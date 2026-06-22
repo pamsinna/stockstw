@@ -26,12 +26,27 @@ _TF2STRAT = {"long": "S4", "revenue": "S5", "growth": "S6",
              "accum": "S7", "combo_47": "S4∩S7"}
 
 # ── 門檻（先用預設，之後可調）─────────────────────────────────────────────────
-FOREIGN_SELL_10D = -1_000_000   # 外資 10 日淨賣超 ≤ 此（股）視為大幅（=1,000 張）
+FOREIGN_SELL_10D = -1_000_000   # 外資 10 日淨賣超 ≤ 此（股）視為大幅（絕對 floor，濾薄量股）
+FOREIGN_SELL_10D_RATIO = -0.05  # 外資 10 日淨額 ÷ 10 日量 ≤ -5% 才算「大幅」（正規化，免被大型股嚇到）
 SELLDAYS_MIN     = 6           # 近 10 日「外資賣超天數 ≥ 此」才算「持續撤離」（非單日事件）
 INST_SELL_5D     = -500_000    # 近 5 日法人淨賣超 ≤ 此（股）才算轉賣（=500 張，濾掉零星）
+SELL_RATIO_5D    = -0.10        # 5 日(外資+投信)淨額 ÷ 5 日量 ≤ -10% 才算重（正規化）
 DIM1_WEAK        = 8.0          # AQS 量價同向 < 此 → 買力轉弱
 AQS_TRAP_SCORE   = 50          # score < 此且 dim4<0 → 派發 trap
 AGE_OUT_DAYS     = 365         # 追蹤上限（純衛生，靜默不通知）
+RETAIL_RISE_MIN  = 0.30         # 散戶比例近月須上升 ≥0.3pp 才算「接手」（濾掉 ±0.1pp 噪音）
+
+
+def retail_rising_recent(sh: pd.DataFrame | None) -> bool:
+    """近月散戶比例是否「明顯」上升（≥RETAIL_RISE_MIN pp）。
+
+    取最近 ~8 週（TDCC 週報）比較最新與起點，要求達門檻才算接手；
+    資料 < 2 點或欄位缺則 False。修正舊版「現在 vs 視窗第一筆」對微幅噪音也回 True 的問題。
+    """
+    if sh is None or sh.empty or "retail_pct" not in sh.columns:
+        return False
+    s = sh.sort_values("date")["retail_pct"].astype(float).tail(8)
+    return bool(len(s) >= 2 and (s.iloc[-1] - s.iloc[0]) >= RETAIL_RISE_MIN)
 
 
 def _load() -> pd.DataFrame:
@@ -83,15 +98,21 @@ def record_today(signals: dict[str, pd.DataFrame], date: str) -> None:
 
 
 def classify(aqs: dict | None, foreign_10d: float | None, foreign_selldays: float | None,
-             inst_5d: float | None, retail_rising: bool) -> tuple[str, list[str]]:
-    """純函式：依籌碼/量價狀態判斷 🚨 出場 / ⚠️ 注意 / ✅ 持有。"""
+             inst_5d: float | None, retail_rising: bool,
+             foreign_10d_ratio: float | None = None) -> tuple[str, list[str]]:
+    """純函式：依籌碼/量價狀態判斷 🚨 出場 / ⚠️ 注意 / ✅ 持有。
+
+    foreign_10d_ratio = 外資10日淨額 ÷ 10日量；有傳就加量能正規化（免被大型股絕對值嚇到）。
+    """
     score = aqs.get("score") if aqs else None
     dim4 = aqs.get("dim4_inst_price_align") if aqs else None
     dim1 = aqs.get("dim1_volprice") if aqs else None
     stage = aqs.get("stage", "") if aqs else ""
 
     # 🚨 出場：資金「持續」撤離（外資10日大幅賣超 + 賣超天數≥門檻 → 非單日事件）+ 散戶接手/紅旗
-    if (foreign_10d is not None and foreign_10d <= FOREIGN_SELL_10D
+    #   大幅 = 絕對額過 floor（濾薄量股）且（若有量資料）佔10日量 ≤ -5%（濾大型股）
+    ratio_heavy = foreign_10d_ratio is None or foreign_10d_ratio <= FOREIGN_SELL_10D_RATIO
+    if (foreign_10d is not None and foreign_10d <= FOREIGN_SELL_10D and ratio_heavy
             and (foreign_selldays is None or foreign_selldays >= SELLDAYS_MIN)
             and (retail_rising or (dim4 is not None and dim4 < 0))):
         why = "散戶比例上升(接手)" if retail_rising else "AQS紅旗(法人賣股價撐)"
@@ -119,7 +140,7 @@ def _metrics(sid: str) -> dict:
     if px.empty:
         return {}
     inst = load_institutional(sid, start="2025-12-01")
-    foreign_10d = inst_5d = foreign_selldays = None
+    foreign_10d = inst_5d = foreign_selldays = foreign_10d_ratio = None
     if not inst.empty:
         inst = inst.sort_values("date")
         f10 = inst["foreign_"].fillna(0).tail(10)
@@ -127,13 +148,12 @@ def _metrics(sid: str) -> dict:
         foreign_selldays = float((f10 < 0).sum())   # 近10日外資賣超天數（持續性）
         net = inst["foreign_"].fillna(0) + (inst["trust"].fillna(0) if "trust" in inst else 0)
         inst_5d = float(net.tail(5).sum())
-    sh = load_shareholding(sid, start="2025-01-01")
-    retail_rising = False
-    if not sh.empty and len(sh) >= 2 and "retail_pct" in sh:
-        sh = sh.sort_values("date")
-        retail_rising = float(sh["retail_pct"].iloc[-1]) > float(sh["retail_pct"].iloc[0])
+        vol_10d = float(px.sort_values("date")["volume"].tail(10).sum()) if "volume" in px else 0.0
+        foreign_10d_ratio = foreign_10d / vol_10d if vol_10d else None
+    retail_rising = retail_rising_recent(load_shareholding(sid, start="2025-01-01"))
     return {"close": float(px.iloc[-1]["close"]), "foreign_10d": foreign_10d,
             "foreign_selldays": foreign_selldays, "inst_5d": inst_5d,
+            "foreign_10d_ratio": foreign_10d_ratio,
             "retail_rising": retail_rising, "aqs": compute_aqs(sid)}
 
 
@@ -159,7 +179,8 @@ def evaluate(date: str) -> pd.DataFrame:
         entry = float(row["entry_price"]) or m["close"]
         pnl = (m["close"] / entry - 1) * 100 if entry else 0.0
         level, reasons = classify(m["aqs"], m["foreign_10d"], m["foreign_selldays"],
-                                  m["inst_5d"], m["retail_rising"])
+                                  m["inst_5d"], m["retail_rising"],
+                                  foreign_10d_ratio=m.get("foreign_10d_ratio"))
         rec = {"level": level, "stock_id": sid, "name": row["name"],
                "strategy": row["strategy"], "entry_date": row["entry_date"],
                "entry_price": entry, "close": m["close"], "pnl_pct": round(pnl, 1),
