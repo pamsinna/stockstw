@@ -166,6 +166,8 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
                   if not meta_df.empty and "regime_60d_return" in meta_df.columns else 0.0)
     credit_stress = (meta_df.iloc[0]["credit_stress"]
                      if not meta_df.empty and "credit_stress" in meta_df.columns else "")
+    telecom_flow = (meta_df.iloc[0]["telecom_flow"]
+                    if not meta_df.empty and "telecom_flow" in meta_df.columns else "")
 
     # 只有「🚨 出場」才從進場區拿掉（真矛盾：又買又賣）；「⚠️ 注意」是 heads-up，可共存
     exits_df = signals.get("exits", pd.DataFrame())
@@ -191,10 +193,11 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
     regime_line = (f"\n大盤 regime：{regime_label}（0050 60日 {regime_ret*100:+.1f}%）"
                    if regime_label else "")
     credit_line = f"\n{credit_stress}" if credit_stress else ""
+    telecom_line = f"\n{telecom_flow}" if telecom_flow else ""
     header = (
         f"📊 <b>台股選股報告 {date}</b>\n"
         f"主力訊號（中長線）：{len(long_df)} 支"
-        f"{regime_line}{credit_line}"
+        f"{regime_line}{credit_line}{telecom_line}"
     )
     messages.append(header)
 

@@ -443,6 +443,15 @@ def run_daily(notify_fn=None) -> dict | None:
     except Exception as e:
         logger.warning(f"Credit stress fetch failed: {e}")
 
+    # 電信三雄法人資金流（純參考）→ 塞進 _meta 給通知顯示
+    try:
+        from data.cache import telecom_flow_summary
+        tf = telecom_flow_summary()
+        if tf and "_meta" in signals and not signals["_meta"].empty:
+            signals["_meta"]["telecom_flow"] = tf
+    except Exception as e:
+        logger.warning(f"Telecom flow summary failed: {e}")
+
     for tf, df in signals.items():
         n = len(df)
         logger.info(f"[{tf}] {n} signals today")

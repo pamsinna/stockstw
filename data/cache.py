@@ -335,6 +335,39 @@ def load_institutional(stock_id: str, start: str = "2018-01-01") -> pd.DataFrame
     return df
 
 
+# ─── 電信三雄法人資金流（純參考，非濾網）───────────────────────────────────────
+TELECOM_TRIO = {"2412": "中華電", "3045": "台灣大", "4904": "遠傳"}
+
+
+def telecom_flow_summary(windows: tuple[int, ...] = (3, 5, 10)) -> str:
+    """電信三雄（2412/3045/4904）法人合計(外資+投信)近N日資金流。純顯示參考，不做任何濾網/門檻。"""
+    start = (pd.Timestamp.now() - pd.Timedelta(days=60)).strftime("%Y-%m-%d")
+    lines = []
+    signs = {w: [] for w in windows}
+    for sid, name in TELECOM_TRIO.items():
+        inst = load_institutional(sid, start=start)
+        if inst.empty:
+            continue
+        net = inst["foreign_"].fillna(0) + inst["trust"].fillna(0)
+        parts = []
+        for w in windows:
+            v = net.tail(w).sum() / 1000  # 股 → 張
+            signs[w].append(v)
+            parts.append(f"{w}日{v:+,.0f}")
+        lines.append(f"{name} " + "／".join(parts))
+    if not lines:
+        return ""
+    align = []
+    for w in windows:
+        vals = signs[w]
+        if len(vals) == 3 and all(v > 0 for v in vals):
+            align.append(f"{w}日同向偏買")
+        elif len(vals) == 3 and all(v < 0 for v in vals):
+            align.append(f"{w}日同向偏賣")
+    tag = "、".join(align) if align else "分歧（個股雜訊居多）"
+    return "📡 電信三雄法人(張)：\n" + "\n".join(lines) + f"\n（{tag}）"
+
+
 # ─── financial ────────────────────────────────────────────────────────────────
 
 def save_financial(stock_id: str, df: pd.DataFrame) -> None:
