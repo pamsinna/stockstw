@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 import pandas as pd
 
-from data.cache import (load_prices, load_institutional, load_shareholding,
+from data.cache import (load_prices, load_institutional, load_shareholding, price_adjust_factor,
                         load_universe, load_open_signals, save_open_signals)
 from analysis.aqs import compute_aqs
 
@@ -177,6 +177,8 @@ def evaluate(date: str) -> pd.DataFrame:
         if not m:
             continue
         entry = float(row["entry_price"]) or m["close"]
+        # 進場後若有分割／減資，進場價換到現在的價格基準（否則一拆三會被當成 −66%）
+        entry *= price_adjust_factor(sid, str(row["entry_date"]))
         pnl = (m["close"] / entry - 1) * 100 if entry else 0.0
         level, reasons = classify(m["aqs"], m["foreign_10d"], m["foreign_selldays"],
                                   m["inst_5d"], m["retail_rising"],

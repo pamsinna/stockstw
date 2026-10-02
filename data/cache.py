@@ -234,17 +234,89 @@ def save_prices_bulk(df: pd.DataFrame) -> None:
         )
 
 
-def load_prices(stock_id: str, start: str = "2018-01-01", end: str = "") -> pd.DataFrame:
-    q = "SELECT * FROM daily_price WHERE stock_id=? AND date>=?"
-    params: list = [stock_id, start]
+# ─── 股本變動還原（分割／面額變更／減資）───────────────────────────────────────
+# DB 存官方原始價（未還原）。台股漲跌幅 ±10%，加上除息也很難單日 < 0.75 倍或
+# > 1.35 倍 → 超出這個範圍視為股本變動（上市頭 5 天無漲跌幅限制，不算）。
+# 例：0050 2025-06-18 一拆四（188.65 → 47.57）沒還原 → MA60 壞掉，S4 嚴格大盤
+# 濾網整整關閉 2025-06 底 ～ 09 中；緯穎 2026-09-02 一拆三 → 動能顯示 −66%。
+SPLIT_LO, SPLIT_HI = 0.75, 1.35
+_CLEAN_RATIOS = (2, 2.5, 3, 4, 5, 8, 10, 20)
+
+
+def _snap_ratio(f: float) -> float:
+    """接近整數拆分（1/k 或 k）就取整，避免把當天真實漲跌也算進還原比例。"""
+    for k in _CLEAN_RATIOS:
+        for c in (k, 1 / k):
+            if abs(f / c - 1) < 0.08:
+                return c
+    return f
+
+
+def corporate_action_events(df: pd.DataFrame) -> list[tuple[pd.Timestamp, float]]:
+    """(事件日, 比例 = 新價/舊價)。df 需已依日期排序、已排除 close<=0。"""
+    if len(df) < 6:
+        return []
+    close = df["close"].to_numpy(dtype=float)
+    opn = df["open"].to_numpy(dtype=float)
+    out = []
+    for i in range(5, len(df)):
+        r = close[i] / close[i - 1]
+        if r < SPLIT_LO or r > SPLIT_HI:
+            raw = opn[i] / close[i - 1] if opn[i] > 0 else r
+            out.append((df["date"].iloc[i], _snap_ratio(raw)))
+    return out
+
+
+def adjust_corporate_actions(df: pd.DataFrame) -> pd.DataFrame:
+    """去掉 close<=0（舊 FinMind 無成交日佔位），並把股本變動前的價量還原到現在基準。"""
+    df = df[df["close"] > 0].reset_index(drop=True)
+    events = corporate_action_events(df)
+    if not events:
+        return df
+    df = df.copy()
+    factor = pd.Series(1.0, index=df.index)
+    for d, f in events:
+        factor[df["date"] < d] *= f
+    for c in ("open", "high", "low", "close"):
+        df[c] = df[c] * factor
+    df["volume"] = df["volume"] / factor
+    return df
+
+
+def price_adjust_factor(stock_id: str, since: str) -> float:
+    """since 之後發生的股本變動累積比例（訊號進場價 × 此值 = 還原後進場價）。"""
+    df = load_prices(stock_id, start="1900-01-01", adjust=False)
+    df = df[df["close"] > 0].reset_index(drop=True)
+    f = 1.0
+    for d, r in corporate_action_events(df):
+        if d > pd.Timestamp(since):
+            f *= r
+    return f
+
+
+def load_prices(stock_id: str, start: str = "2018-01-01", end: str = "",
+                adjust: bool = True) -> pd.DataFrame:
+    """日 K。adjust=True（預設）：去掉 close<=0、還原分割／減資（見 adjust_corporate_actions）。
+
+    還原需看到完整歷史（判斷上市頭 5 天），所以先讀到 end 為止的全部，還原後再切 start。
+    """
+    q = "SELECT * FROM daily_price WHERE stock_id=?"
+    params: list = [stock_id]
+    if not adjust:
+        q += " AND date>=?"
+        params.append(start)
     if end:
         q += " AND date<=?"
         params.append(end)
     q += " ORDER BY date"
     with _conn() as con:
         df = pd.read_sql(q, con, params=params)
-    if not df.empty:
-        df["date"] = pd.to_datetime(df["date"])
+    if df.empty:
+        return df
+    df["date"] = pd.to_datetime(df["date"])
+    if adjust:
+        df = adjust_corporate_actions(df)
+        df = df[df["date"] >= pd.Timestamp(start)].reset_index(drop=True)
     return df
 
 

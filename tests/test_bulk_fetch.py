@@ -320,3 +320,50 @@ def test_latest_due_quarter(day, expected):
     from datetime import date
     from screener.daily_run import _latest_due_quarter
     assert _latest_due_quarter(date.fromisoformat(day)) == expected
+
+
+# ─── 股本變動還原（2026-10：0050 一拆四沒還原 → S4 大盤濾網關 3 個月）─────────
+
+def _px(closes, opens=None, start="2025-06-02"):
+    dates = pd.bdate_range(start, periods=len(closes))
+    opens = opens or closes
+    return pd.DataFrame({"stock_id": "X", "date": dates, "open": opens, "high": closes,
+                         "low": closes, "close": closes, "volume": [1000.0] * len(closes)})
+
+
+def test_split_snaps_to_clean_ratio_and_scales_volume():
+    df = _px([100, 101, 102, 101, 100, 100, 26.0, 26.5], opens=[100] * 6 + [25.5, 26.0])
+    out = cache.adjust_corporate_actions(df)
+    assert cache.corporate_action_events(df)[0][1] == 0.25          # 25.5/100 → 取整 1/4
+    assert out["close"].iloc[5] == 25.0 and out["close"].iloc[6] == 26.0
+    assert out["volume"].iloc[0] == 4000.0 and out["volume"].iloc[-1] == 1000.0
+
+
+def test_capital_reduction_uses_open_ratio():
+    df = _px([10, 10, 10, 10, 10, 10, 17.0], opens=[10] * 6 + [17.0])
+    out = cache.adjust_corporate_actions(df)
+    assert abs(out["close"].iloc[0] - 17.0) < 1e-9                 # 減資 1.7 倍（非整數）照開盤比例
+
+
+def test_limit_moves_and_first_five_days_not_adjusted():
+    # 漲停 +10% 不是股本變動；上市頭 5 天無漲跌幅限制的大漲也不算
+    df = _px([50, 90, 95, 99, 104, 110, 121.0])
+    assert cache.corporate_action_events(df) == []
+
+
+def test_zero_close_rows_dropped():
+    df = _px([10, 0, 10.5, 0, 11, 11, 11])
+    assert (cache.adjust_corporate_actions(df)["close"] > 0).all()
+    assert len(cache.adjust_corporate_actions(df)) == 5
+
+
+def test_load_prices_adjusts_and_respects_start(temp_db):
+    df = _px([100, 101, 102, 101, 100, 100, 26.0, 26.5], opens=[100] * 6 + [25.5, 26.0])
+    cache.save_prices_bulk(df.drop(columns=[]).assign(stock_id="0050"))
+    start = df["date"].iloc[4].strftime("%Y-%m-%d")
+    adj = cache.load_prices("0050", start=start)
+    raw = cache.load_prices("0050", start=start, adjust=False)
+    assert len(adj) == len(raw) == 4
+    assert adj["close"].iloc[0] == 25.0 and raw["close"].iloc[0] == 100.0
+    assert cache.price_adjust_factor("0050", df["date"].iloc[2].strftime("%Y-%m-%d")) == 0.25
+    assert cache.price_adjust_factor("0050", df["date"].iloc[7].strftime("%Y-%m-%d")) == 1.0
