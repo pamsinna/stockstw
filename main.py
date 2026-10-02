@@ -1,6 +1,7 @@
 """
 主入口：
   python main.py screen     # 每日選股（GitHub Actions 用）
+  python main.py rules      # 發送策略規則對照並置頂 Telegram
   python main.py backtest   # 跑回測 + 輸出報告
   python main.py download   # 只下載資料不選股
 """
@@ -21,6 +22,11 @@ def main() -> None:
         from screener.daily_run import run_daily
         from notify import notify
         run_daily(notify_fn=notify)
+
+    elif mode == "rules":
+        # 發送策略規則對照並置頂（改規則後重發一次即可）
+        from notify.telegram_bot import send_rules
+        send_rules(pin=True)
 
     elif mode == "backtest":
         subprocess.run([
@@ -88,7 +94,7 @@ def main() -> None:
         ])
 
     else:
-        print("Usage: python main.py [screen|backtest|download|download-revenue|download-per|download-financial|optimize]")
+        print("Usage: python main.py [screen|rules|backtest|download|download-revenue|download-per|download-financial|optimize]")
         sys.exit(1)
 
 

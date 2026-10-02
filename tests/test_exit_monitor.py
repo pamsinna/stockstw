@@ -81,9 +81,9 @@ def test_exit_dedup_removes_stock_from_entry_section():
                            "reason": "派發"}])
     meta = pd.DataFrame([{"regime_label": "多頭", "regime_60d_return": 0.1}])
     msgs = format_signals({"long": long_df, "exits": exits, "_meta": meta}, "2026-06-22")
-    long_section = [m for m in msgs if "中長線" in m]
-    assert all("2458" not in m for m in long_section)   # 進場區沒有 2458
-    assert any("📤" in m and "2458" in m for m in msgs)  # 出場區有 2458
+    m = "\n".join(msgs)
+    assert "新進場候選" not in m                          # 唯一候選被 🚨 拿掉 → 無進場區
+    assert "2458" in m[m.index("要處理"):]               # 出場區有 2458
 
 
 def test_warn_does_not_suppress_entry():
@@ -99,8 +99,8 @@ def test_warn_does_not_suppress_entry():
                            "reason": "買力轉弱"}])
     meta = pd.DataFrame([{"regime_label": "多頭", "regime_60d_return": 0.1}])
     msgs = format_signals({"long": long_df, "exits": exits, "_meta": meta}, "2026-06-22")
-    long_section = [m for m in msgs if "中長線" in m]
-    assert any("2458" in m for m in long_section)   # ⚠️ 不 suppress，進場區仍有
+    m = "\n".join(msgs)
+    assert "2458" in m[m.index("新進場候選"):]     # ⚠️ 不 suppress，進場區仍有
 
 
 def test_large_cap_small_ratio_not_sustained():

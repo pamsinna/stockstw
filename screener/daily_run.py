@@ -38,6 +38,7 @@ from technical.signals import (
     signal_revenue_momentum,
     signal_growth_breakout,
     signal_accumulation_eve,
+    signal_revenue_burst,
     STRATEGIES,
 )
 from analysis.aqs import compute_aqs
@@ -80,6 +81,8 @@ PER_BACKFILL_MAX_DAYS = 200
 # 同一檔抓過但 FinMind 還沒有新季 → 隔幾天再試，避免天天浪費額度。
 FIN_REFRESH_PER_RUN = 150
 FIN_RETRY_DAYS = 5
+# 觀察名單（營收爆發）回看窗：近 20 交易日內觸發過都列，今日新觸發標 🆕
+WATCH_WINDOW = 20
 
 
 def update_monthly_revenue(today, keep: set[str]) -> None:
@@ -296,8 +299,11 @@ def screen_today(universe: pd.DataFrame,
     回傳 {timeframe: DataFrame of signals today}
     timeframe: "short", "swing", "long"
     """
-    results: dict[str, list] = {"long": [], "revenue": [], "growth": [], "accum": [], "combo_47": []}
+    results: dict[str, list] = {"long": [], "revenue": [], "growth": [], "accum": [], "combo_47": [],
+                                "watch": []}
     market_map = dict(zip(universe["stock_id"], universe["market"]))
+    industry_map = (dict(zip(universe["stock_id"], universe["industry"]))
+                    if "industry" in universe.columns else {})
 
     # 回測規則：S4 ∩ S7 在 20 交易日內接力 — 60 日勝率 66.3%、平均 +11.33%
     # （vs 60d window 的 60.4% / +10.37%，vs S7 only 56.9% / +8.40%）。
@@ -355,7 +361,7 @@ def screen_today(universe: pd.DataFrame,
             f"🚨 資料過期：代理 {TAIEX_PROXY} 最新 {last_trading_day.date()}，落後現實 "
             f"{proxy_stale_days} 天（> {MAX_PROXY_STALE_DAYS}）— 中止選股，不發訊號"
         )
-        out = {k: pd.DataFrame() for k in ("long", "revenue", "growth", "accum", "combo_47")}
+        out = {k: pd.DataFrame() for k in ("long", "revenue", "growth", "accum", "combo_47", "watch")}
         out["_meta"] = pd.DataFrame([{
             "regime_label": f"🚨 資料過期 {proxy_stale_days} 天，已暫停選股",
             "regime_60d_return": 0.0,
@@ -419,6 +425,12 @@ def screen_today(universe: pd.DataFrame,
             df_rv = signal_revenue_momentum(price, inst_arg, rev_arg, per_df=per_arg, market_filter=mf)
             if bool(df_rv.iloc[-1]["signal_rev"]):
                 results["revenue"].append(_summary_row(sid, market, df_rv, "revenue"))
+
+            # 觀察名單：營收爆發＋突破（不分基本面，參考用，不是進場訊號）
+            df_b = signal_revenue_burst(price, rev_arg, market_filter=mf)
+            w = _watch_row(sid, market, industry_map.get(sid, ""), df_b, inst)
+            if w:
+                results["watch"].append(w)
 
             # 策略六：高成長突破（需基本面 pass，loose market filter）
             if sid in fund_ok:
@@ -485,6 +497,27 @@ def screen_today(universe: pd.DataFrame,
         "regime_60d_return": regime_60d_return,
     }])
     return out
+
+
+def _watch_row(stock_id: str, market: str, industry: str,
+               df: pd.DataFrame, inst: pd.DataFrame) -> dict | None:
+    """近 WATCH_WINDOW 交易日內觸發過營收爆發 → 觀察名單一列（取最近一次觸發）。"""
+    recent = df.tail(WATCH_WINDOW)
+    hits = recent[recent["signal_burst"]]
+    if hits.empty:
+        return None
+    h = hits.iloc[-1]
+    close = float(df.iloc[-1]["close"])
+    f60 = float(inst["foreign_"].tail(60).sum()) if inst is not None and not inst.empty else float("nan")
+    return {
+        "stock_id": stock_id, "market": market, "industry": industry or "未分類",
+        "trigger_date": pd.Timestamp(h["date"]).strftime("%Y-%m-%d"),
+        "trigger_close": float(h["close"]), "close": close,
+        "since_pct": (close / float(h["close"]) - 1) * 100,
+        "is_new": bool(df.iloc[-1]["signal_burst"]),
+        "burst_yoy": float(h["burst_yoy"]), "burst_g3": float(h["burst_g3"]),
+        "f_60d": f60, "vol_ratio": 0.0,
+    }
 
 
 def _summary_row(stock_id: str, market: str,

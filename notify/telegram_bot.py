@@ -1,6 +1,6 @@
 """
 Telegram 通知：用同步 requests 發訊息，不需要 async（GitHub Actions 環境簡單用）
-訊號格式：每個時間框架一則訊息，清楚列出股票代號、市場、關鍵指標
+訊號格式：照動作分三層（🚨要處理 → 🛒新進場候選 → 👀觀察），規則另發置頂訊息
 """
 import os
 import time
@@ -145,237 +145,258 @@ def _aqs_plain(score: float, stage: str) -> str:
     return "🚫 籌碼很差，避開"
 
 
+# ─── 每日通知：照「動作」分三層（要處理 → 新進場候選 → 觀察），不照策略分 ──────
+# 2026-10 改版：舊版每策略一則、同股重複出現、每天重印停利停損說明 → 易讀性差。
+# 規則類說明移到置頂訊息（rules_message / send_rules），每日只用 [S4] 標籤。
+
+TG_MAX_LEN = 4000           # Telegram 上限 4096，留緩衝
+MAX_CANDIDATES = 15         # 進場候選合併後上限（依動能取前 N）
+MAX_WATCH = 15              # 觀察名單上限
+_TAG_ORDER = [("long", "S4"), ("revenue", "S5"), ("growth", "S6"), ("accum", "S7")]
+_WEEKDAY = "一二三四五六日"
+
+
+def _zhang(v: float) -> str:
+    """股 → 張，帶正負號。"""
+    if v is None or pd.isna(v):
+        return "—"
+    return f"{v / 1000:+,.0f}張"
+
+
+def _merge_candidates(signals: dict[str, pd.DataFrame], drop: set[str]) -> pd.DataFrame:
+    """S4/S5/S6/S7 + S4∩S7 合併成每檔一列，tags = 命中的策略標籤。"""
+    rows: dict[str, dict] = {}
+    for key, tag in _TAG_ORDER:
+        df = signals.get(key)
+        if df is None or df.empty:
+            continue
+        for _, r in df.iterrows():
+            sid = str(r["stock_id"])
+            if sid in drop:
+                continue
+            cur = rows.setdefault(sid, {**r.to_dict(), "stock_id": sid, "tags": []})
+            cur["tags"].append(tag)
+            # 補齊先前策略沒有的欄位（例：S5 沒有 AQS、S4 沒有營收年增）
+            for k, v in r.to_dict().items():
+                if _isnan(cur.get(k)) and not _isnan(v):
+                    cur[k] = v
+    # S4∩S7：今天觸發一邊、另一邊在近 20 日觸發過 → 兩個標籤都補上（另一邊標 *）
+    combo = signals.get("combo_47")
+    if combo is not None and not combo.empty:
+        for _, r in combo.iterrows():
+            sid = str(r["stock_id"])
+            if sid in drop:
+                continue
+            cur = rows.setdefault(sid, {**r.to_dict(), "stock_id": sid, "tags": []})
+            for tag in ("S4", "S7"):
+                if tag not in cur["tags"]:
+                    cur["tags"].append(f"{tag}*")
+            cur["tags"].sort(key=lambda t: t.rstrip("*"))
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(list(rows.values()))
+
+
+def _candidate_line(i: int, r, names: dict[str, str]) -> str:
+    sid = r["stock_id"]
+    tags = "+".join(r["tags"])
+    star = "⭐" if len(r["tags"]) >= 2 else ""
+    f60 = r.get("f_60d", float("nan"))
+    t60 = r.get("t_60d", float("nan"))
+    inst60 = (0 if pd.isna(f60) else f60) + (0 if pd.isna(t60) else t60)
+    parts = [f"{i}. <b>{sid} {names.get(sid, '')}</b>  {r.get('close', '—')}  [{tags}{star}]"]
+    detail = []
+    if any(t.startswith("S5") for t in r["tags"]) and not pd.isna(r.get("revenue_yoy", float("nan"))):
+        detail.append(f"營收年增{r['revenue_yoy']:+.0f}%")
+    if inst60:
+        detail.append(f"法人60日{_zhang(inst60)}")
+    m = r.get("_mom20", float("nan"))
+    if not pd.isna(m):
+        detail.append(f"動能{m:+.0%}" + ("⚠️未表態" if m <= 0 else ""))
+    plain = _aqs_plain(r.get("aqs_score", float("nan")), r.get("aqs_stage", "") or "")
+    line = parts[0] + ("\n   " + "  ".join(detail) if detail else "")
+    if plain:
+        line += f"\n   {plain}"
+    return line
+
+
+def _watch_section(watch: pd.DataFrame, names: dict[str, str]) -> list[str]:
+    """觀察名單：依產業分組（檔數多的族群在前），組內 🆕 優先、再按觸發後漲幅。"""
+    if watch is None or watch.empty:
+        return []
+    w = watch.copy()
+    w["stock_id"] = w["stock_id"].astype(str)
+    w = w.sort_values(["is_new", "since_pct"], ascending=[False, False])
+    n_total, n_new = len(w), int(w["is_new"].sum())
+    counts = w["industry"].value_counts()
+    w["_ind_n"] = w["industry"].map(counts)
+    w = w.sort_values(["_ind_n", "industry", "is_new", "since_pct"],
+                      ascending=[False, True, False, False]).head(MAX_WATCH)
+    lines = [f"👀 <b>營收爆發觀察</b>（近20日 {n_total} 檔，🆕 今日 {n_new}）",
+             "<i>不是進場訊號；看哪個族群集中、觸發後有沒有續漲，題材自己判斷</i>"]
+    for ind, g in w.groupby("industry", sort=False):
+        lines.append(f"\n<b>{ind}</b> {counts[ind]}")
+        for _, r in g.iterrows():
+            new = "🆕" if r["is_new"] else ""
+            since = "" if r["is_new"] else f"（觸發後{r['since_pct']:+.0f}%）"
+            lines.append(
+                f" {new}{r['stock_id']} {names.get(r['stock_id'], '')}  {r['close']:g}{since}"
+                f"  營收年增{r['burst_yoy']:+.0f}% 近3月{r['burst_g3']:+.0f}%  外資60日{_zhang(r['f_60d'])}"
+            )
+    if n_total > len(w):
+        lines.append(f"\n<i>…另有 {n_total - len(w)} 檔，見 reports/signals_watch CSV</i>")
+    return lines
+
+
+def _pack(blocks: list[str]) -> list[str]:
+    """把區塊依序塞進 ≤ TG_MAX_LEN 的訊息（區塊間空一行）；過長的區塊按行切。"""
+    msgs: list[str] = []
+    cur = ""
+    for block in blocks:
+        for i, line in enumerate(block.split("\n")):
+            sep = "" if not cur else ("\n\n" if i == 0 else "\n")
+            if cur and len(cur) + len(sep) + len(line) > TG_MAX_LEN:
+                msgs.append(cur)
+                cur, sep = "", ""
+            cur += sep + line
+    if cur:
+        msgs.append(cur)
+    return msgs
+
+
+def _isnan(v) -> bool:
+    return v is None or (isinstance(v, float) and pd.isna(v))
+
+
 def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
-    """
-    只主推策略四（中長線）。
-    訊號超過 10 支時按成交量排序（流動性優先）。
-    附近期績效監控與執行紀律提醒。
-    """
-    messages = []
     names = _name_map()
+    meta = signals.get("_meta", pd.DataFrame())
 
-    long_df    = signals.get("long",    pd.DataFrame())
-    revenue_df = signals.get("revenue", pd.DataFrame())
-    growth_df  = signals.get("growth",  pd.DataFrame())
-    accum_df   = signals.get("accum",   pd.DataFrame())
-    combo_df   = signals.get("combo_47", pd.DataFrame())
-    meta_df    = signals.get("_meta",   pd.DataFrame())
-    regime_label = (meta_df.iloc[0]["regime_label"]
-                    if not meta_df.empty and "regime_label" in meta_df.columns else "")
-    regime_ret = (meta_df.iloc[0]["regime_60d_return"]
-                  if not meta_df.empty and "regime_60d_return" in meta_df.columns else 0.0)
-    credit_stress = (meta_df.iloc[0]["credit_stress"]
-                     if not meta_df.empty and "credit_stress" in meta_df.columns else "")
-    telecom_flow = (meta_df.iloc[0]["telecom_flow"]
-                    if not meta_df.empty and "telecom_flow" in meta_df.columns else "")
+    def mget(k, default=""):
+        if meta is None or meta.empty or k not in meta.columns:
+            return default
+        v = meta.iloc[0][k]
+        return default if _isnan(v) else v
 
-    # 只有「🚨 出場」才從進場區拿掉（真矛盾：又買又賣）；「⚠️ 注意」是 heads-up，可共存
-    exits_df = signals.get("exits", pd.DataFrame())
-    _exit_sids = (set(exits_df[exits_df["level"].astype(str).str.contains("出場")]["stock_id"].astype(str))
-                  if isinstance(exits_df, pd.DataFrame) and not exits_df.empty
-                  and {"stock_id", "level"} <= set(exits_df.columns) else set())
-    if _exit_sids:
-        def _drop_exits(df):
-            if not df.empty and "stock_id" in df.columns:
-                return df[~df["stock_id"].astype(str).isin(_exit_sids)].reset_index(drop=True)
-            return df
-        long_df = _drop_exits(long_df)
-        revenue_df = _drop_exits(revenue_df)
-        growth_df = _drop_exits(growth_df)
-        accum_df = _drop_exits(accum_df)
-        combo_df = _drop_exits(combo_df)
+    regime_label, regime_ret = mget("regime_label"), mget("regime_60d_return", 0.0)
 
-    # 候選一律按「動能20日」由強到弱排序；超過上限時保留動能最強者
-    # （實測：候選內動能排序前半 vs 後半淨差 +0.68pp；法人/成交金額排序無此效果）
-    long_df = _rank_mom(long_df, date)
+    # ── Header：一行大盤脈絡 ───────────────────────────────────────────────
+    wd = _WEEKDAY[pd.Timestamp(date).weekday()]
+    head = f"📊 <b>{pd.Timestamp(date):%m/%d}（{wd}）</b>"
+    if regime_label:
+        head += f"  {regime_label}｜0050 60日 {regime_ret*100:+.1f}%"
+    blocks = [head]
 
-    # ── Header ────────────────────────────────────────────────────────────
-    regime_line = (f"\n大盤 regime：{regime_label}（0050 60日 {regime_ret*100:+.1f}%）"
-                   if regime_label else "")
-    credit_line = f"\n{credit_stress}" if credit_stress else ""
-    telecom_line = f"\n{telecom_flow}" if telecom_flow else ""
-    header = (
-        f"📊 <b>台股選股報告 {date}</b>\n"
-        f"主力訊號（中長線）：{len(long_df)} 支"
-        f"{regime_line}{credit_line}{telecom_line}"
-    )
-    messages.append(header)
-
-    # ── 📤 訊號出場/注意（系統發過進場訊號者，籌碼惡化才提醒；非個人持股）──
-    exits_df = signals.get("exits", pd.DataFrame())
-    if isinstance(exits_df, pd.DataFrame) and not exits_df.empty:
+    # ── 🚨 要處理：系統發過訊號者籌碼惡化 ──────────────────────────────────
+    exits = signals.get("exits", pd.DataFrame())
+    exit_ids: set[str] = set()
+    if isinstance(exits, pd.DataFrame) and not exits.empty:
         order = {"🚨 出場": 0, "⚠️ 注意": 1}
-        exits_df = (exits_df.assign(_o=exits_df["level"].map(lambda x: order.get(x, 2)))
-                    .sort_values("_o"))
-        e_lines = ["📤 <b>訊號出場/注意</b>（系統發過進場訊號者，籌碼惡化才提醒）"]
-        for _, r in exits_df.iterrows():
+        exits = exits.assign(_o=exits["level"].map(lambda x: order.get(x, 2))).sort_values("_o")
+        # 只有 🚨 出場才從進場候選拿掉（真矛盾）；⚠️ 注意可共存
+        exit_ids = set(exits[exits["level"].astype(str).str.contains("出場")]["stock_id"].astype(str))
+        lines = [f"🚨 <b>要處理</b>（{len(exits)}）"]
+        for _, r in exits.iterrows():
             sid = str(r["stock_id"])
             nm = r.get("name") or names.get(sid, "")
-            e_lines.append(
-                f"{r['level']} <b>{sid} {nm}</b>（{r['strategy']}）  "
-                f"進場 {r['entry_date']} @{r['entry_price']:.1f} → 今 {r['close']:.1f}"
-                f"（{r['pnl_pct']:+.1f}%）\n  {r['reason']}"
+            lines.append(
+                f"{r['level']} <b>{sid} {nm}</b> [{r['strategy']}] "
+                f"{r['entry_date'][5:].replace('-', '/')}進 {r['entry_price']:.1f}→{r['close']:.1f}"
+                f"（{r['pnl_pct']:+.1f}%）\n   {r['reason']}"
             )
-        messages.append("\n".join(e_lines))
+        blocks.append("\n".join(lines))
 
-    # ── 🎯 高信心：S4 ∩ S7 兩月內交集 ─────────────────────────────────────
-    if not combo_df.empty:
-        c_lines = [
-            f"🎯 <b>高信心進場 (S4 ∩ S7, 20d 窗)</b>  共 {len(combo_df)} 支",
-            "<i>回測 60 日勝率 66.3%、平均 +11.33%（vs S7 only 56.9%）</i>\n",
-        ]
-        combo_df = _rank_mom(combo_df, date)
-        for _, row in combo_df.head(MAX_POSITIONS).iterrows():
-            emoji = MARKET_EMOJI.get(row.get("market", "TWSE"), "⚪")
-            sid   = row["stock_id"]
-            close = row.get("close", "—")
-            f60   = row.get("f_60d", float("nan"))
-            t60   = row.get("t_60d", float("nan"))
-            inst60 = (0 if pd.isna(f60) else f60) + (0 if pd.isna(t60) else t60)
-            inst_str = f"+{int(inst60//1000):,}張" if inst60 > 0 else f"{int(inst60//1000):,}張"
-            name = names.get(sid, "")
-            s4_today = row.get("s4_today", False)
-            s7_today = row.get("s7_today", False)
-            trigger = "今日 S4+S7" if s4_today and s7_today else ("今日 S4" if s4_today else "今日 S7")
-            plain = _aqs_plain(row.get("aqs_score", float("nan")), row.get("aqs_stage", ""))
-            sub = (f"{trigger} · {plain}" if plain else trigger) + _mom_str(row)
-            c_lines.append(
-                f"{emoji} <b>{sid} {name}</b>  ${close}  法人60日{inst_str}\n  {sub}"
-            )
-        messages.append("\n".join(c_lines))
+    # ── 🛒 新進場候選：合併、每檔一列、動能排序 ─────────────────────────────
+    cands = _merge_candidates(signals, exit_ids)
+    if not cands.empty:
+        cands = _rank_mom(cands, date)
+        lines = [f"🛒 <b>新進場候選</b>（{len(cands)}）依動能排序"]
+        for i, (_, r) in enumerate(cands.head(MAX_CANDIDATES).iterrows(), 1):
+            lines.append(_candidate_line(i, r, names))
+        if len(cands) > MAX_CANDIDATES:
+            lines.append(f"<i>…另有 {len(cands) - MAX_CANDIDATES} 檔動能較弱，略</i>")
+        blocks.append("\n".join(lines))
+        long_df = signals.get("long", pd.DataFrame())
+        if long_df is not None and not long_df.empty:
+            _append_signal_log(long_df[~long_df["stock_id"].astype(str).isin(exit_ids)], date)
 
-    # ── 近期績效監控 ──────────────────────────────────────────────────────
+    # ── 👀 觀察名單 ────────────────────────────────────────────────────────
+    w_lines = _watch_section(signals.get("watch", pd.DataFrame()), names)
+    if w_lines:
+        blocks.append("\n".join(w_lines))
+
+    if len(blocks) == 1:
+        blocks.append("今日無新訊號，持股不動")
+
+    # ── 只在異常時才出現：近期實盤勝率紅燈 ──────────────────────────────────
     recent = _load_recent_log(20)
     if len(recent) >= 10:
         wr = (recent["result"] == "win").mean()
-        status = "🟢 正常" if wr >= WIN_RATE_PAUSE_THR else "🔴 警告：近期勝率偏低"
-        perf_msg = (
-            f"📉 <b>近 {len(recent)} 筆實盤勝率：{wr*100:.0f}%</b>  {status}\n"
-            f"{'⚠️ 建議暫停並檢視策略是否失效' if wr < WIN_RATE_PAUSE_THR else ''}"
-        )
-        messages.append(perf_msg)
+        if wr < WIN_RATE_PAUSE_THR:
+            blocks.append(f"🔴 <b>近 {len(recent)} 筆實盤勝率 {wr*100:.0f}%</b>，建議暫停並檢視策略是否失效")
 
-    # ── 主力策略：中長線 ──────────────────────────────────────────────────
-    if long_df.empty:
-        messages.append("🏔 <b>中長線（主力）</b>\n今日無訊號，持股不動")
-    else:
-        lines = [
-            f"🏔 <b>中長線（主力）</b>  共 {len(long_df)} 支",
-            "停利 +30%  停損 -10%  最長 90 天",
-            "<i>超過 10 支時取動能最強者；⚠️動能未表態 = 價格還沒表態、可跳過</i>\n",
-        ]
-        for _, row in long_df.head(MAX_POSITIONS).iterrows():
-            emoji = MARKET_EMOJI.get(row.get("market", "TWSE"), "⚪")
-            sid   = row["stock_id"]
-            close = row.get("close", "—")
-            f60   = row.get("f_60d", float("nan"))
-            t60   = row.get("t_60d", float("nan"))
-            inst60  = (0 if pd.isna(f60) else f60) + (0 if pd.isna(t60) else t60)
-            inst_str = f"+{int(inst60//1000):,}張" if inst60 > 0 else f"{int(inst60//1000):,}張"
-            name = names.get(sid, "")
-            plain = _aqs_plain(row.get("aqs_score", float("nan")), row.get("aqs_stage", ""))
-            line = f"{emoji} <b>{sid} {name}</b>  ${close}  法人60日{inst_str}{_mom_str(row)}"
-            if plain:
-                line += f"\n  {plain}"
-            lines.append(line)
-        messages.append("\n".join(lines))
-        _append_signal_log(long_df, date)
+    # ── 📎 參考（脈絡，放最後）──────────────────────────────────────────────
+    ref = [x for x in (mget("credit_stress"), mget("telecom_flow")) if x]
+    if ref:
+        blocks.append("📎 <b>參考</b>\n" + "\n".join(ref))
 
-    # ── 策略五：月營收動能（每月 10 日後才有，其他日子不顯示）──────────────
-    if not revenue_df.empty:
-        # Regime-aware：2026 多頭 S5 80% 勝率 +42%；空頭時 0%；以 0050 60d 報酬為閘
-        if "多頭" in regime_label:
-            s5_priority = "🔥 <b>主力升級</b>（2026 多頭，回測 80% 勝率 +42%）"
-        elif "空頭" in regime_label:
-            s5_priority = "🥶 <b>建議暫停或減半</b>（空頭環境 S5 失效）"
+    return _pack(blocks)
+
+
+def rules_message() -> str:
+    """策略規則對照（置頂用）。數字直接讀 STRATEGIES，避免文字與設定脫節。"""
+    from technical.signals import STRATEGIES
+    by = {s["timeframe"]: s for s in STRATEGIES}
+    size = {"long": "1 單位", "revenue": "1 單位（大盤 60 日 ≤ −5% 時減半）",
+            "growth": "S4 的 1/2～2/3", "accum": "S4 的 1/3（大盤跌破 MA60 兩週以上暫停）"}
+
+    def exit_rule(st) -> str:
+        sl = f"停損 −{st['default_sl']:.0%}"
+        if st.get("trail_trigger"):
+            tp = f"漲 +{st['trail_trigger']:.0%} 後從高點回落 {st.get('trail_pct', 0.15):.0%} 出場"
         else:
-            s5_priority = "🟡 中性環境，正常部位"
-        rev_lines = [
-            f"📊 <b>策略五：月營收動能</b>  共 {len(revenue_df)} 支",
-            f"停利 +40%  停損 -12%  最長 120 天   {s5_priority}",
-            "<i>今為公布後第一交易日，基本面轉折訊號</i>\n",
-        ]
-        revenue_df = _rank_mom(revenue_df, date)
-        for _, row in revenue_df.head(MAX_POSITIONS).iterrows():
-            emoji = MARKET_EMOJI.get(row.get("market", "TWSE"), "⚪")
-            sid   = row["stock_id"]
-            close = row.get("close", "—")
-            yoy   = row.get("revenue_yoy", float("nan"))
-            f20   = row.get("f_20d", float("nan"))
-            yoy_str = f"+{yoy:.0f}%" if not pd.isna(yoy) else "—"
-            f20_val = 0 if pd.isna(f20) else f20
-            f20_str = f"+{int(f20_val//1000):,}張" if f20_val > 0 else f"{int(f20_val//1000):,}張"
-            name = names.get(sid, "")
-            rev_lines.append(
-                f"{emoji} <b>{sid} {name}</b>  ${close}  營收年增{yoy_str}  外資20日{f20_str}{_mom_str(row)}"
-            )
-        messages.append("\n".join(rev_lines))
+            tp = f"停利 +{st['default_tp']:.0%}"
+        return f"{sl}｜{tp}｜最長 {st['default_hold']} 天"
 
-    # ── 策略六：高成長突破（regime-conditional，AI bull 時加強）─────────────
-    if not growth_df.empty:
-        # 按動能 20 日由強到弱排（實測候選內動能排序才有效，法人排序無效）
-        growth_df = _rank_mom(growth_df, date)
-        g_lines = [
-            f"🚀 <b>策略六：高成長突破</b>  共 {len(growth_df)} 支",
-            "停利 +30%  停損 -10%  trailing +80%/-15%  最長 90 天",
-            "<i>⚠️ regime-conditional，勝率僅 ~38%（少數大贏家拉抬）</i>",
-            "<i>⚠️ 部位應比主力小（建議 S4 的 1/2 ~ 2/3）</i>\n",
-        ]
-        for _, row in growth_df.head(MAX_POSITIONS_S6).iterrows():
-            emoji = MARKET_EMOJI.get(row.get("market", "TWSE"), "⚪")
-            sid   = row["stock_id"]
-            close = row.get("close", "—")
-            f60   = row.get("f_60d", float("nan"))
-            t60   = row.get("t_60d", float("nan"))
-            inst60 = (0 if pd.isna(f60) else f60) + (0 if pd.isna(t60) else t60)
-            inst_str = f"+{int(inst60//1000):,}張" if inst60 > 0 else f"{int(inst60//1000):,}張"
-            name = names.get(sid, "")
-            plain = _aqs_plain(row.get("aqs_score", float("nan")), row.get("aqs_stage", ""))
-            line = f"{emoji} <b>{sid} {name}</b>  ${close}  法人60日{inst_str}{_mom_str(row)}"
-            if plain:
-                line += f"\n  {plain}"
-            g_lines.append(line)
-        messages.append("\n".join(g_lines))
+    lines = ["📌 <b>策略規則對照</b>（每日通知只用標籤）"]
+    for key, tag in _TAG_ORDER:
+        st = by.get(key)
+        if st:
+            lines.append(f"\n<b>[{tag}] {st['name']}</b>\n{exit_rule(st)}\n部位：{size[key]}")
+    lines += [
+        "\n⭐ = 兩個以上策略同時看好（回測只有 S4+S7 證實勝率較高：66% vs 57%）",
+        "S4* = 該策略不是今天、而是近 20 個交易日內觸發過",
+        "動能 = 近 20 日漲跌；⚠️未表態 = 價格還沒動，可跳過",
+        "👀 營收爆發觀察 = 不是進場訊號，題材與時機自己判斷",
+        "🚨 出場 / ⚠️ 注意 = 系統發過訊號的股票籌碼惡化（不是你的持股）",
+        "\n紀律：連續虧損時不可修改參數。停損是策略的一部分，不是失敗。",
+    ]
+    return "\n".join(lines)
 
-    # ── 策略七：累積前夕（狙擊手型，每年 ~70 筆訊號）──────────────────────
-    if not accum_df.empty:
-        # 排序：先按 ⚡（已破 MA20，回測 66%→72%）優先，再按動能 20 日由強到弱
-        accum_df = _rank_mom(accum_df, date)
-        if "above_ma20" in accum_df.columns:
-            accum_df = accum_df.sort_values(["above_ma20", "_mom20"],
-                                            ascending=[False, False], na_position="last")
-        a_lines = [
-            f"🎯 <b>策略七：累積前夕</b>  共 {len(accum_df)} 支",
-            "停損 -20%（寬）  trailing +80%/-15%  最長 180 天",
-            "<i>📡 抓「法人偷收貨、股價還沒反映」的早中期累積</i>",
-            "<i>⚡ = 已破 MA20（趨勢較確定、勝率較高，優先看）</i>",
-            "<i>⚠️ 勝率 ~52%，連虧 3-4 筆是正常；部位建議 S4 的 1/3</i>\n",
-        ]
-        for _, row in accum_df.head(MAX_POSITIONS).iterrows():
-            emoji = MARKET_EMOJI.get(row.get("market", "TWSE"), "⚪")
-            sid   = row["stock_id"]
-            close = row.get("close", "—")
-            f60   = row.get("f_60d", float("nan"))
-            t60   = row.get("t_60d", float("nan"))
-            inst60 = (0 if pd.isna(f60) else f60) + (0 if pd.isna(t60) else t60)
-            inst_str = f"+{int(inst60//1000):,}張" if inst60 > 0 else f"{int(inst60//1000):,}張"
-            name = names.get(sid, "")
-            plain = _aqs_plain(row.get("aqs_score", float("nan")), row.get("aqs_stage", ""))
-            # ⚡ 標籤：close > MA20（基於失敗分析：勝率 66%→72%）
-            tag = "⚡ " if row.get("above_ma20", False) else "  "
-            line = f"{tag}{emoji} <b>{sid} {name}</b>  ${close}  法人60日{inst_str}{_mom_str(row)}"
-            if plain:
-                line += f"\n  {plain}"
-            a_lines.append(line)
-        messages.append("\n".join(a_lines))
 
-    # ── 執行紀律提醒 ──────────────────────────────────────────────────────
-    messages.append(
-        "📌 <i>紀律提醒：連續虧損時不可修改參數。"
-        "停損是策略的一部分，不是失敗。</i>"
-    )
-
-    return messages
+def send_rules(pin: bool = True) -> bool:
+    """發送規則對照並置頂（群組需 bot 有置頂權限；失敗只記 log）。"""
+    if not TOKEN or not CHAT_IDS:
+        logger.warning("Telegram not configured (TOKEN or CHAT_ID missing)")
+        return False
+    ok = True
+    for chat_id in CHAT_IDS:
+        try:
+            r = requests.post(f"{API_URL}/sendMessage",
+                              json={"chat_id": chat_id, "text": rules_message(), "parse_mode": "HTML"},
+                              timeout=10)
+            r.raise_for_status()
+            if pin:
+                mid = r.json()["result"]["message_id"]
+                p = requests.post(f"{API_URL}/pinChatMessage",
+                                  json={"chat_id": chat_id, "message_id": mid,
+                                        "disable_notification": True}, timeout=10)
+                if not p.ok:
+                    logger.warning(f"Pin failed (chat_id={chat_id}): {p.text[:200]}")
+        except Exception as e:
+            logger.error(f"Telegram rules send failed (chat_id={chat_id}): {e}")
+            ok = False
+    return ok
 
 
 def notify(signals: dict[str, pd.DataFrame]) -> None:

@@ -125,3 +125,23 @@ def test_revenue_momentum_signal_day_in_report_month():
     days = df.loc[df["signal_rev"], "date"]
     assert pd.Timestamp("2024-04-10") in set(days)
     assert not any((days >= "2024-05-01") & (days <= "2024-05-31"))
+
+
+def test_revenue_burst_triggers_on_first_breakout_after_publish():
+    from technical.signals import signal_revenue_burst
+    dates = pd.bdate_range("2023-01-02", "2024-06-28")
+    close = pd.Series(100.0, index=range(len(dates)))
+    i0 = dates.get_indexer([pd.Timestamp("2024-04-15")])[0]
+    close.iloc[i0:] = 130.0                       # 4/15 放量突破
+    vol = pd.Series(1_000_000.0, index=close.index)
+    vol.iloc[i0] = 3_000_000.0
+    price = pd.DataFrame({"date": dates, "open": close, "high": close + 1, "low": close - 1,
+                          "close": close, "volume": vol})
+    labels = pd.date_range("2022-01-01", "2024-06-01", freq="MS")
+    rev = pd.DataFrame({"date": labels, "revenue": 100.0})
+    rev.loc[rev["date"] >= "2024-02-01", "revenue"] = 300.0   # 申報月 02～04 營收三倍 → 04-01 那筆 3M 合計創高
+    out = signal_revenue_burst(price, rev)
+    hits = out.loc[out["signal_burst"], "date"].tolist()
+    assert pd.Timestamp("2024-04-15") in hits
+    assert all(d >= pd.Timestamp("2024-02-10") for d in hits)          # 不早於公布日
+    assert out.loc[out["date"] == "2024-04-15", "burst_yoy"].iloc[0] > 50

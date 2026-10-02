@@ -163,6 +163,29 @@ def signal_swing_dual_inst(df: pd.DataFrame,
 
 # ─── 策略五：月營收動能 + 法人確認（基本面轉折因子）─────────────────────────
 
+def _revenue_publish_date(d: pd.Timestamp, fetched=None) -> pd.Timestamp:
+    """月營收公布日：有 fetched_date 用實際抓取日，否則退回申報月 10 日（法定期限）。
+
+    fetched_date 由 save_monthly_revenue* 在首次抓到時寫入，代表資料真實可用日。
+    注意 DB date 已是「申報月」（3 月營收 → 04-01），10 日 = 法定公布期限。
+    舊版又 +1 個月（以為 date 是營收月）→ 訊號整整晚一個月才發。
+    """
+    default = pd.Timestamp(d.year, d.month, 10)
+    if fetched is not None and not pd.isna(fetched):
+        fetched_ts = pd.Timestamp(fetched)
+        # 只在 fetched_date 落於預期發布窗口 ±20 天內才採用
+        # 避免 bootstrap 把所有歷史資料的 fetched_date 設成同一天造成訊號爆炸
+        if abs((fetched_ts - default).days) <= 20:
+            return fetched_ts
+    return default
+
+
+def _publish_dates(rev: pd.DataFrame) -> list[pd.Timestamp]:
+    has_fetched = "fetched_date" in rev.columns
+    return [_revenue_publish_date(row["date"], row["fetched_date"] if has_fetched else None)
+            for _, row in rev.iterrows()]
+
+
 def signal_revenue_momentum(
     df: pd.DataFrame,
     inst_df: pd.DataFrame | None = None,
@@ -220,25 +243,7 @@ def signal_revenue_momentum(
     rev["rev_lag24"] = rev["revenue"].shift(24)
     rev["cagr_2y"] = (rev["revenue"] / rev["rev_lag24"]) ** 0.5 - 1
 
-    # ── 公布日：有 fetched_date 用實際抓取日，否則退回申報月 10 日（法定期限）──
-    # fetched_date 由 save_monthly_revenue 在首次抓到時寫入，代表資料真實可用日
-    # 注意 DB date 已是「申報月」（3 月營收 → 04-01），10 日 = 法定公布期限。
-    # 舊版又 +1 個月（以為 date 是營收月）→ 訊號整整晚一個月才發。
-    def _pub(d: pd.Timestamp, fetched=None) -> pd.Timestamp:
-        default = pd.Timestamp(d.year, d.month, 10)
-        if fetched is not None and not pd.isna(fetched):
-            fetched_ts = pd.Timestamp(fetched)
-            # 只在 fetched_date 落於預期發布窗口 ±20 天內才採用
-            # 避免 bootstrap 把所有歷史資料的 fetched_date 設成同一天造成訊號爆炸
-            if abs((fetched_ts - default).days) <= 20:
-                return fetched_ts
-        return default
-
-    has_fetched = "fetched_date" in rev.columns
-    rev["publish_date"] = [
-        _pub(row["date"], row["fetched_date"] if has_fetched else None)
-        for _, row in rev.iterrows()
-    ]
+    rev["publish_date"] = _publish_dates(rev)
 
     # ── 所有四條基本面條件通過的公布日 ───────────────────────────────────────
     cagr_ok = rev["cagr_2y"].isna() | (rev["cagr_2y"] > 0.05)
@@ -551,6 +556,66 @@ def signal_accumulation_eve(df: pd.DataFrame,
         df["t_60d"] = df["trust"].rolling(60, min_periods=30).sum() if "trust" in df.columns else 0
 
     return _apply_market_filter(df, "signal_accum", market_filter)
+
+
+# ─── 觀察名單：營收爆發＋突破（參考，不是進場訊號，不在 STRATEGIES）────────────
+# 2026-10 事件研究（條件事前定死，不針對 AMAX-KY 調參）：每筆期望值 IS +7.1% /
+# OOS +7.9% / 2026 +0.7%，勝率僅 ~22%，報酬幾乎全來自前 10% 大贏家。
+# 但按族群拆開，2026 伺服器/零組件 +11.6%、半導體 −4.9% —— 有沒有用取決於
+# 「現在主流題材是誰」，這是回測做不到、要靠人判斷的 → 只當觀察名單推送。
+
+def signal_revenue_burst(df: pd.DataFrame,
+                         rev_df: pd.DataFrame | None = None,
+                         market_filter: pd.Series | None = None,
+                         yoy_min: float = 50.0,
+                         g3_min: float = 30.0,
+                         window: int = 20,
+                         breakout_days: int = 60,
+                         vol_mult: float = 1.5) -> pd.DataFrame:
+    """營收爆發後第一次放量突破。
+
+    事件（月營收公布日）：單月 YoY ≥ yoy_min、近 3 月合計 vs 前 3 月 ≥ g3_min%、
+    近 3 月合計創歷史新高（排除基期效應）。
+    觸發：公布後 window 個交易日內，第一天「收盤創 breakout_days 日新高 + 量 ≥
+    20 日均量 × vol_mult + 站上 MA60」（且大盤 loose 多頭）。
+    觸發列附 burst_yoy / burst_g3（%）。
+    """
+    df = add_all(df).sort_values("date").reset_index(drop=True)
+    df["signal_burst"] = False
+    df["burst_yoy"] = float("nan")
+    df["burst_g3"] = float("nan")
+    if rev_df is None or rev_df.empty or len(rev_df) < 15:
+        return df
+
+    rev = rev_df.sort_values("date").copy()
+    rev["revenue"] = pd.to_numeric(rev["revenue"], errors="coerce")
+    yoy = rev["revenue"].pct_change(12) * 100
+    if "revenue_yoy" in rev.columns:
+        yoy = pd.to_numeric(rev["revenue_yoy"], errors="coerce").fillna(yoy)
+    rev["yoy"] = yoy
+    rev["s3"] = rev["revenue"].rolling(3).sum()
+    rev["g3"] = (rev["s3"] / rev["s3"].shift(3) - 1) * 100
+    rev["ath"] = rev["s3"] >= rev["s3"].cummax()
+    rev["publish_date"] = _publish_dates(rev)
+    events = rev[(rev["yoy"] >= yoy_min) & (rev["g3"] >= g3_min) & rev["ath"]]
+    if events.empty:
+        return df
+
+    brk = ((df["close"] >= df["close"].rolling(breakout_days, min_periods=breakout_days).max())
+           & (df["volume"] >= vol_mult * df["volume"].rolling(20, min_periods=10).mean())
+           & (df["close"] > df["ma60"]))
+    if market_filter is not None and not market_filter.empty:
+        brk &= df["date"].map(market_filter).fillna(False).astype(bool)
+
+    for _, ev in events.iterrows():
+        win = df.index[df["date"] >= ev["publish_date"]][:window]
+        hit = [i for i in win if brk.at[i]]
+        if hit:
+            i = hit[0]
+            df.at[i, "signal_burst"] = True
+            df.at[i, "burst_yoy"] = float(ev["yoy"])
+            df.at[i, "burst_g3"] = float(ev["g3"])
+    return df
 
 
 # ─── 全策略清單（供批次回測用）────────────────────────────────────────────────
