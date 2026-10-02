@@ -117,18 +117,40 @@ def _calc_margins(fin: pd.DataFrame) -> dict:
     return {"gross_margin": gross_margin, "op_margin": op_margin}
 
 
+def _ttm_from_ytd(ytd: pd.Series) -> float:
+    """年初至今累計（現金流量表慣例）→ 近四季 TTM。
+    TTM = 最新 YTD + 去年全年 − 去年同期 YTD；最新若為年底，YTD 即全年。"""
+    if ytd.empty:
+        return np.nan
+    ytd = ytd.sort_index()
+    d = ytd.index[-1]
+    if d.month == 12:
+        return float(ytd.iloc[-1])
+    prev_fy = pd.Timestamp(d.year - 1, 12, 31)
+    prev_same = d - pd.DateOffset(years=1)
+    prev_same = pd.Timestamp(prev_same.year, prev_same.month, prev_same.days_in_month)
+    if prev_fy not in ytd.index or prev_same not in ytd.index:
+        return np.nan
+    return float(ytd.iloc[-1] + ytd[prev_fy] - ytd[prev_same])
+
+
 def _calc_ocf_ratio(fin: pd.DataFrame) -> dict:
-    """現金轉換率 = OCF / Net Income（> 0.6 代表盈餘品質佳）"""
-    ocf_df = fin[fin["type"].isin(["OperatingCashFlow", "營業活動現金流量"])].copy()
-    ni_df  = fin[fin["type"].isin(["NetIncome", "本期淨利"])].copy()
+    """現金轉換率 = TTM 營業現金流 / TTM 稅後淨利（> 0.6 代表盈餘品質佳）。
+
+    FinMind 欄名是 CashFlowsFromOperatingActivities（累計 YTD）、淨利是
+    IncomeAfterTaxes（單季）。舊版找 OperatingCashFlow / NetIncome 永遠找不到
+    → ocf_ratio 恆為 NaN，OCF 加分與「OCF < 0 剔除」從未生效（2026-10 修正）。
+    """
+    ocf = fin[fin["type"] == "CashFlowsFromOperatingActivities"]
+    ni = fin[fin["type"] == "IncomeAfterTaxes"].sort_values("date")
+    ocf_ttm = _ttm_from_ytd(ocf.set_index(pd.to_datetime(ocf["date"]))["value"])
+    ni_ttm = ni.tail(4)["value"].sum() if len(ni) >= 4 else np.nan
 
     ocf_ratio = np.nan
-    if not ocf_df.empty and not ni_df.empty:
-        ocf = ocf_df.sort_values("date").iloc[-1]["value"]
-        ni  = ni_df.sort_values("date").iloc[-1]["value"]
-        if ni and ni != 0:
-            ocf_ratio = ocf / ni
-
+    if _ok(ocf_ttm) and _ok(ni_ttm) and ni_ttm > 0:
+        ocf_ratio = ocf_ttm / ni_ttm
+    elif _ok(ocf_ttm) and ocf_ttm < 0:
+        ocf_ratio = -1.0  # 虧損且燒現金：比率無意義，標負值讓「OCF < 0」硬門檻生效
     return {"ocf_ratio": ocf_ratio}
 
 
