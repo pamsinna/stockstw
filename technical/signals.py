@@ -220,11 +220,12 @@ def signal_revenue_momentum(
     rev["rev_lag24"] = rev["revenue"].shift(24)
     rev["cagr_2y"] = (rev["revenue"] / rev["rev_lag24"]) ** 0.5 - 1
 
-    # ── 公布日：有 fetched_date 用實際抓取日，否則退回次月 10 日（保守估計）──
+    # ── 公布日：有 fetched_date 用實際抓取日，否則退回申報月 10 日（法定期限）──
     # fetched_date 由 save_monthly_revenue 在首次抓到時寫入，代表資料真實可用日
+    # 注意 DB date 已是「申報月」（3 月營收 → 04-01），10 日 = 法定公布期限。
+    # 舊版又 +1 個月（以為 date 是營收月）→ 訊號整整晚一個月才發。
     def _pub(d: pd.Timestamp, fetched=None) -> pd.Timestamp:
-        y, m = d.year, d.month
-        default = pd.Timestamp(y + 1, 1, 10) if m == 12 else pd.Timestamp(y, m + 1, 10)
+        default = pd.Timestamp(d.year, d.month, 10)
         if fetched is not None and not pd.isna(fetched):
             fetched_ts = pd.Timestamp(fetched)
             # 只在 fetched_date 落於預期發布窗口 ±20 天內才採用
@@ -423,9 +424,8 @@ def signal_growth_breakout(df: pd.DataFrame,
     rev["revenue"] = pd.to_numeric(rev["revenue"], errors="coerce")
     rev["rev_3m_sum"] = rev["revenue"].rolling(3, min_periods=3).sum()
     rev["rev_3m_growth"] = (rev["rev_3m_sum"] / rev["rev_3m_sum"].shift(3) - 1) * 100
-    rev["pub_date"] = rev["date"].apply(
-        lambda d: pd.Timestamp(d.year + (1 if d.month == 12 else 0),
-                               1 if d.month == 12 else d.month + 1, 11))
+    # DB date 已是申報月（營收月 + 1）→ 公布日 = 申報月 11 日（法定 10 日 + 1 天緩衝）
+    rev["pub_date"] = rev["date"].apply(lambda d: pd.Timestamp(d.year, d.month, 11))
     rev_pub = rev[["pub_date", "rev_3m_growth"]].dropna().sort_values("pub_date")
     rev_pub = rev_pub.rename(columns={"pub_date": "date"})
 

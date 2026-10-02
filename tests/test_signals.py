@@ -11,6 +11,7 @@ import pytest
 
 from technical.signals import (
     STRATEGIES,
+    signal_growth_breakout,
     signal_longterm_quality_entry,
     signal_revenue_momentum,
     signal_short_vol_breakout,
@@ -85,3 +86,42 @@ def test_short_vol_breakout_runs_without_inst_df(synthetic_ohlcv):
 def test_swing_ma_kd_runs_without_inst_df(synthetic_ohlcv):
     out = signal_swing_ma_kd_inst(synthetic_ohlcv, inst_df=None)
     assert "signal_swing" in out.columns
+
+
+# ─── 營收公布日：DB date 已是「申報月」（3 月營收 → 04-01）─────────────────────
+# 回歸測試：舊版又 +1 個月，S5/S6 營收訊號整整晚一個月（2026-10 修正）。
+
+def _flat_ohlcv(start="2023-01-02", end="2024-06-28"):
+    dates = pd.bdate_range(start, end)
+    n = len(dates)
+    close = pd.Series(range(n), dtype=float) * 0.1 + 100
+    return pd.DataFrame({"date": dates, "open": close - 0.5, "high": close + 1,
+                         "low": close - 1, "close": close, "volume": 1_000_000.0})
+
+
+def _rev_jump_at(label: str):
+    """2022-01 ~ 2024-06 月營收；只有申報月 label 那一筆跳升 3 倍（單月爆量）。"""
+    labels = pd.date_range("2022-01-01", "2024-06-01", freq="MS")
+    rev = [100.0 * (1.01 ** i) for i in range(len(labels))]
+    df = pd.DataFrame({"date": labels, "revenue": rev})
+    df.loc[df["date"] == label, "revenue"] *= 3
+    df["revenue_yoy"] = df["revenue"].pct_change(12) * 100
+    return df
+
+
+def test_growth_breakout_uses_report_month_publish_date():
+    price = _flat_ohlcv()
+    rev = _rev_jump_at("2024-04-01")  # 3 月營收，法定 4/10 前公布
+    df = signal_growth_breakout(price, None, rev)
+    g = df.set_index("date")["rev_3m_growth"]
+    assert g.loc["2024-04-10"] < 50          # 公布日前還看不到
+    assert g.loc["2024-04-11"] > 50          # 申報月 11 日起可用（不是 5/11）
+
+
+def test_revenue_momentum_signal_day_in_report_month():
+    price = _flat_ohlcv()
+    rev = _rev_jump_at("2024-04-01")
+    df = signal_revenue_momentum(price, None, rev)
+    days = df.loc[df["signal_rev"], "date"]
+    assert pd.Timestamp("2024-04-10") in set(days)
+    assert not any((days >= "2024-05-01") & (days <= "2024-05-31"))
