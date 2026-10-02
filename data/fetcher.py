@@ -62,7 +62,7 @@ def _parse_isin_page(mode: str, market: str) -> pd.DataFrame:
     """
     url = "https://isin.twse.com.tw/isin/C_public.jsp"
     resp = _session.get(url, params={"strMode": mode}, timeout=15)
-    resp.encoding = "big5"
+    resp.encoding = "cp950"  # 不能用 big5：碁/堃 等擴充字會變亂碼（宏碁 → 宏��）
     tables = pd.read_html(io.StringIO(resp.text))
     df = tables[0].copy()
     # 第 0 列是欄位名稱
@@ -421,7 +421,7 @@ def fetch_mops_monthly_revenue(year: int, month: int) -> pd.DataFrame:
                 r = _session.get(url, timeout=30)
                 if r.status_code != 200:
                     continue
-                r.encoding = "big5"
+                r.encoding = "cp950"  # big5 解不出碁等擴充字
                 df = _parse_mops_revenue_html(r.text, label)
             except Exception as e:
                 logger.warning(f"MOPS revenue {url} failed: {e}")

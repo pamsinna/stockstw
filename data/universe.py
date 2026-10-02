@@ -26,6 +26,10 @@ logger = logging.getLogger(__name__)
 
 def build_universe(force_refresh: bool = False) -> pd.DataFrame:
     existing = load_universe()
+    # 舊版用 big5 解碼 ISIN 頁，碁/堃 等字變亂碼（宏碁 → 宏��）→ 偵測到就重抓一次
+    if not existing.empty and existing["stock_name"].astype(str).str.contains("\ufffd").any():
+        logger.info("Universe has garbled names (old big5 decode) — refreshing")
+        force_refresh = True
     if not existing.empty and not force_refresh:
         existing = existing[~existing["industry"].isin(EXCLUDED_INDUSTRIES)].reset_index(drop=True)
         logger.info(f"Universe loaded from cache: {len(existing)} stocks")
