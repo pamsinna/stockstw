@@ -363,13 +363,127 @@ def _parse_revenue_opendata(data) -> pd.DataFrame:
 
 
 def fetch_all_monthly_revenue() -> pd.DataFrame:
-    """全市場最新月營收（上市+上櫃 MOPS opendata）。免 token、各一次請求。"""
+    """全市場最新月營收（上市+上櫃 MOPS opendata）。免 token、各一次請求。
+
+    ⚠️ opendata 約每月 17 日才換成新月份（實測 8 月營收出表日 0917），比法定
+    10 日公布晚一週以上 → 每日選股改用 fetch_mops_monthly_revenue（即時）。
+    """
     parts = []
     for url in (f"{TWSE_OPENAPI}/opendata/t187ap05_L",
                 f"{TPEX_OPENAPI}/mopsfin_t187ap05_O"):
         df = _parse_revenue_opendata(_get(url, {}, timeout=30))
         if not df.empty:
             parts.append(df)
+    return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+
+
+# MOPS 月營收彙總靜態頁：公司申報後即時更新，可指定任意歷史月份。
+# sii=上市、otc=上櫃；_0=國內公司、_1=外國公司（KY 股在 _1，漏抓就沒有 KY）。
+MOPS_REVENUE_URL = "https://mopsov.twse.com.tw/nas/t21/{mk}/t21sc03_{roc}_{m}_{k}.html"
+
+
+def _parse_mops_revenue_html(html: str, label_date: str) -> pd.DataFrame:
+    """解析 t21sc03 HTML（每個產業一張 11 欄表）→ stock_id/date/revenue/revenue_yoy。"""
+    try:
+        tables = pd.read_html(io.StringIO(html), flavor="lxml")
+    except (ValueError, ImportError):  # 無任何 <table>（該月尚無人申報／頁面不存在）
+        return pd.DataFrame()
+    rows = []
+    for t in tables:
+        if t.shape[1] != 11:
+            continue
+        for r in t.itertuples(index=False):
+            code = str(r[0]).strip()
+            if not code.isdigit():  # 「合計」列
+                continue
+            rev = _num(r[2])  # 仟元
+            rows.append({
+                "stock_id": code,
+                "date": label_date,
+                "revenue": rev * 1000 if rev is not None else None,
+                "revenue_yoy": _num(r[6]),
+            })
+    return pd.DataFrame(rows).drop_duplicates("stock_id") if rows else pd.DataFrame()
+
+
+def fetch_mops_monthly_revenue(year: int, month: int) -> pd.DataFrame:
+    """全市場（上市+上櫃，含 KY）指定營收月份的月營收。4 個請求、免 token。
+
+    date 沿用 DB 慣例「申報月」= 營收月 + 1（3 月營收 → date 04-01）。
+    """
+    ry, rm = (year + 1, 1) if month == 12 else (year, month + 1)
+    label = f"{ry:04d}-{rm:02d}-01"
+    parts = []
+    for mk in ("sii", "otc"):
+        for k in (0, 1):
+            url = MOPS_REVENUE_URL.format(mk=mk, roc=year - 1911, m=month, k=k)
+            try:
+                r = _session.get(url, timeout=30)
+                if r.status_code != 200:
+                    continue
+                r.encoding = "big5"
+                df = _parse_mops_revenue_html(r.text, label)
+            except Exception as e:
+                logger.warning(f"MOPS revenue {url} failed: {e}")
+                continue
+            if not df.empty:
+                parts.append(df)
+            time.sleep(0.5)
+    if not parts:
+        return pd.DataFrame()
+    return pd.concat(parts, ignore_index=True).drop_duplicates("stock_id")
+
+
+# ─── 本益比 bulk（TWSE BWIBBU_d + TPEx peQryDate，可指定歷史日期）─────────────
+
+def _per_num(s) -> float:
+    """本益比：官方以 '-' / 'N/A' 表示虧損（無意義）→ 0，對齊 FinMind 慣例。
+    不能留 NaN：訊號端把 NaN 視為「無資料放行」，虧損股會被誤放。"""
+    v = _num(s)
+    return v if v is not None else 0.0
+
+
+def fetch_twse_per_by_date(date_iso: str) -> pd.DataFrame:
+    """全上市單日本益比／股價淨值比／殖利率。非交易日回傳空 DataFrame。"""
+    data = _get(f"{TWSE_BASE}/BWIBBU_d",
+                {"response": "json", "date": date_iso.replace("-", ""), "selectType": "ALL"}, timeout=30)
+    if not data or data is _PERM_SKIP or data.get("stat") != "OK":
+        return pd.DataFrame()
+    fields = data.get("fields") or []
+    if "證券代號" not in fields:
+        return pd.DataFrame()
+    idx = {name: i for i, name in enumerate(fields)}
+    rows = [{
+        "stock_id": r[idx["證券代號"]].strip(), "date": date_iso,
+        "per": _per_num(r[idx["本益比"]]), "pbr": _num(r[idx["股價淨值比"]]),
+        "div_yield": _num(r[idx["殖利率(%)"]]),
+    } for r in data.get("data", [])]
+    return pd.DataFrame(rows)
+
+
+def fetch_tpex_per_by_date(date_iso: str) -> pd.DataFrame:
+    """全上櫃單日本益比／股價淨值比／殖利率。非交易日回傳空 DataFrame。"""
+    y, m, d = date_iso.split("-")
+    data = _get(f"{TPEX_WWW}/afterTrading/peQryDate",
+                {"date": f"{y}/{m}/{d}", "response": "json"}, timeout=30)
+    if not data or data is _PERM_SKIP or str(data.get("stat", "")).lower() != "ok":
+        return pd.DataFrame()
+    tables = data.get("tables") or []
+    if not tables or not tables[0].get("data"):
+        return pd.DataFrame()
+    idx = {name: i for i, name in enumerate(tables[0]["fields"])}
+    rows = [{
+        "stock_id": r[idx["股票代號"]].strip(), "date": date_iso,
+        "per": _per_num(r[idx["本益比"]]), "pbr": _num(r[idx["股價淨值比"]]),
+        "div_yield": _num(r[idx["殖利率(%)"]]),
+    } for r in tables[0]["data"]]
+    return pd.DataFrame(rows)
+
+
+def fetch_all_per_by_date(date_iso: str) -> pd.DataFrame:
+    """TWSE + TPEx 單日全市場本益比。"""
+    parts = [fetch_twse_per_by_date(date_iso), fetch_tpex_per_by_date(date_iso)]
+    parts = [p for p in parts if not p.empty]
     return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
 
 

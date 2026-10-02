@@ -221,3 +221,102 @@ def test_earliest_last_date_since(temp_db):
     assert cache.earliest_last_date_since("price", "2026-05-18") == "2026-06-09"
     # cutoff 更早：C 也算進來
     assert cache.earliest_last_date_since("price", "2026-01-01") == "2026-04-30"
+
+
+# ─── 2026-10 漏洞修補：MOPS 月營收／PER bulk／財報滾動刷新 ──────────────────────
+
+_MOPS_HTML = """<html><body>
+<table><tr><th>產業別：電腦及週邊設備業</th></tr></table>
+<table>
+<tr><th rowspan=2>公司 代號</th><th rowspan=2>公司名稱</th><th colspan=5>營業收入</th>
+    <th colspan=3>累計營業收入</th><th rowspan=2>備註</th></tr>
+<tr><th>當月營收</th><th>上月營收</th><th>去年當月營收</th><th>上月比較 增減(%)</th>
+    <th>去年同月 增減(%)</th><th>當月累計營收</th><th>去年累計營收</th><th>前期比較 增減(%)</th></tr>
+<tr><td>6933</td><td>AMAX-KY</td><td>585,033</td><td>665,135</td><td>338,937</td>
+    <td>-12.04</td><td>72.6</td><td>3,070,638</td><td>2,736,011</td><td>12.23</td><td>-</td></tr>
+<tr><td>合計</td><td></td><td>585,033</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+</table></body></html>"""
+
+
+def test_parse_mops_revenue_html_units_and_total_row():
+    df = fetcher._parse_mops_revenue_html(_MOPS_HTML, "2026-06-01")
+    assert df["stock_id"].tolist() == ["6933"]  # 「合計」列被排除
+    r = df.iloc[0]
+    assert r["date"] == "2026-06-01"
+    assert r["revenue"] == 585033000.0           # 仟元 × 1000
+    assert abs(r["revenue_yoy"] - 72.6) < 1e-9
+
+
+def test_parse_mops_revenue_html_empty_page():
+    # 外國公司頁在月初常常還沒有任何申報 → 無 <table>，不可拋例外
+    assert fetcher._parse_mops_revenue_html("<html><body>無資料</body></html>", "2026-10-01").empty
+
+
+def test_twse_per_loss_maps_to_zero(monkeypatch):
+    payload = {"stat": "OK",
+               "fields": ["證券代號", "證券名稱", "收盤價", "殖利率(%)", "股利年度",
+                          "本益比", "股價淨值比", "財報年/季"],
+               "data": [["6933", "AMAX-KY", "371.00", "0.67", 114, "46.03", "6.26", "115/2"],
+                        ["9999", "虧損股", "10.00", "0.00", 114, "-", "0.80", "115/2"]]}
+    monkeypatch.setattr(fetcher, "_get", _fake_get(payload))
+    df = fetcher.fetch_twse_per_by_date("2026-09-30").set_index("stock_id")
+    assert df.loc["6933", "per"] == 46.03 and df.loc["6933", "pbr"] == 6.26
+    # 虧損不可是 NaN：訊號端 NaN = 無資料放行，會誤放虧損股
+    assert df.loc["9999", "per"] == 0.0
+
+
+def test_tpex_per_na_maps_to_zero(monkeypatch):
+    payload = {"stat": "ok", "tables": [{
+        "fields": ["股票代號", "公司名稱", "本益比", "每股股利", "股利年度",
+                   "殖利率(%)", "股價淨值比", "財報年/季"],
+        "data": [["1240", "茂生農經", "10.09", "0.5", 114, "0.92", "1.60", "115Q2"],
+                 ["8888", "虧損櫃", "N/A", "0", 114, "0.00", "1.10", "115Q2"]]}]}
+    monkeypatch.setattr(fetcher, "_get", _fake_get(payload))
+    df = fetcher.fetch_tpex_per_by_date("2026-09-30").set_index("stock_id")
+    assert df.loc["1240", "per"] == 10.09
+    assert df.loc["8888", "per"] == 0.0
+
+
+def test_save_per_bulk_and_last_full_market_date(temp_db):
+    full = pd.DataFrame([{"stock_id": f"{i:04d}", "date": "2026-05-05",
+                          "per": 10.0, "pbr": 1.0, "div_yield": 2.0} for i in range(3)])
+    stray = pd.DataFrame([{"stock_id": "0000", "date": "2026-06-22",
+                           "per": 11.0, "pbr": 1.0, "div_yield": 2.0}])
+    cache.save_per_bulk(full)
+    cache.save_per_bulk(stray)
+    # 零星一檔的新日期不能讓全市場看起來是新的
+    assert cache.last_full_market_date("daily_per", min_rows=3) == "2026-05-05"
+    assert cache.last_per_date("0000") == "2026-06-22"
+
+
+def test_save_monthly_revenue_bulk_backfill_keeps_fetched_null(temp_db):
+    cache.save_monthly_revenue_bulk(pd.DataFrame([
+        {"stock_id": "6933", "date": "2026-06-01", "revenue": 5.85e8, "revenue_yoy": 72.6},
+    ]), fetched_date=None)
+    r = cache.load_monthly_revenue("6933")
+    assert pd.isna(r.iloc[0]["fetched_date"])
+    assert cache.revenue_month_counts("2026-01-01") == {"2026-06-01": 1}
+
+
+def test_stale_financial_stocks_order_and_retry(temp_db):
+    cache.save_financial("A", pd.DataFrame([{"date": "2025-12-31", "type": "EPS", "value": 1.0}]))
+    cache.save_financial("B", pd.DataFrame([{"date": "2025-09-30", "type": "EPS", "value": 1.0}]))
+    cache.save_financial("C", pd.DataFrame([{"date": "2026-06-30", "type": "EPS", "value": 1.0}]))
+    todo = cache.stale_financial_stocks(["A", "B", "C", "D"], "2026-06-30", "2026-09-27")
+    assert todo == ["B", "A", "D"]  # 最落後先補；已是最新季的 C 不補；沒財報的 D 排最後
+    cache.mark_financial_attempt("B", "2026-09-30")
+    assert cache.stale_financial_stocks(["A", "B"], "2026-06-30", "2026-09-27") == ["A"]
+
+
+@pytest.mark.parametrize("day,expected", [
+    ("2026-10-02", "2026-06-30"),
+    ("2026-08-18", "2026-03-31"),
+    ("2026-08-19", "2026-06-30"),
+    ("2026-04-04", "2025-09-30"),
+    ("2026-04-05", "2025-12-31"),
+    ("2026-12-01", "2026-09-30"),
+])
+def test_latest_due_quarter(day, expected):
+    from datetime import date
+    from screener.daily_run import _latest_due_quarter
+    assert _latest_due_quarter(date.fromisoformat(day)) == expected

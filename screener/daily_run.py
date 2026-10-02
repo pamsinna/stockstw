@@ -16,7 +16,9 @@ from config import DATA_START
 from data.cache import (
     init_db, load_prices, load_institutional, load_monthly_revenue, load_per,
     save_prices, save_institutional, save_prices_bulk, save_institutional_bulk,
-    save_monthly_revenue_bulk,
+    save_monthly_revenue_bulk, save_per_bulk, save_financial,
+    last_full_market_date, revenue_month_counts,
+    stale_financial_stocks, mark_financial_attempt,
     last_price_date, last_institutional_date, earliest_last_date_since,
     mark_fetch_skip, load_shareholding_latest,
     save_shareholding, last_shareholding_date,
@@ -26,7 +28,9 @@ from data.universe import build_universe
 from data.fetcher import (fetch_price, fetch_institutional,
                           fetch_tdcc_shareholding, fetch_futures_inst,
                           fetch_all_prices_by_date, fetch_all_inst_by_date,
-                          fetch_all_monthly_revenue)
+                          fetch_mops_monthly_revenue, fetch_all_per_by_date,
+                          fetch_financial_statement, fetch_balance_sheet,
+                          fetch_cash_flow)
 from backtest.run_backtest import build_market_filter
 from fundamental.quality_filter import batch_fundamentals
 from technical.signals import (
@@ -67,6 +71,116 @@ MIN_REFETCH_DAYS = 7
 # 選股不發訊號（避免拿舊價當「今日」，見 2026-06 FinMind 額度爆掉事件）。設 7：
 # 涵蓋一般連假，真凍結（會逐日擴大）一週內必觸發；長假誤觸也只是「無新資料不選股」。
 MAX_PROXY_STALE_DAYS = 7
+# 月營收整月缺漏回補：檢查最近這幾個申報月，筆數 < 最多那月 × 比例 → 重抓該月。
+REV_GAPFILL_MONTHS = 6
+REV_GAPFILL_RATIO = 0.8
+# 本益比 bulk：從「最後一個全市場都有 PER 的日期」補起，最多回補這麼多日曆天。
+PER_BACKFILL_MAX_DAYS = 200
+# 財報滾動刷新：每次最多刷新幾檔（× 3 張表 × 6s FinMind 限速 ≈ 45 分鐘，~8 天輪完 1145 檔）；
+# 同一檔抓過但 FinMind 還沒有新季 → 隔幾天再試，避免天天浪費額度。
+FIN_REFRESH_PER_RUN = 150
+FIN_RETRY_DAYS = 5
+
+
+def update_monthly_revenue(today, keep: set[str]) -> None:
+    """月營收：每天抓 MOPS t21sc03（即時頁），INSERT OR IGNORE 保留首次抓到日
+    = 實際公布日。
+
+    舊版只在 1～10 日抓 opendata，但 opendata 約 17 日才換月 → 永遠抓到上一期，
+    整個營收因子晚 3～4 週；遷移那個月還整月漏掉（2026-06 申報月只剩 1 筆）。
+    """
+    # 1) 最新營收月（上個月）：每天抓，公司陸續申報陸續進來
+    ry, rm = (today.year - 1, 12) if today.month == 1 else (today.year, today.month - 1)
+    rev = fetch_mops_monthly_revenue(ry, rm)
+    if not rev.empty:
+        rev = rev[rev["stock_id"].isin(keep)]
+        save_monthly_revenue_bulk(rev)
+        logger.info(f"Monthly revenue (MOPS) {ry}-{rm:02d}: {len(rev)} rows.")
+    else:
+        logger.warning(f"Monthly revenue (MOPS) {ry}-{rm:02d} returned empty")
+
+    # 2) 整月缺漏回補（不含當月：當月本來就還在陸續申報）
+    labels = []
+    y, m = today.year, today.month
+    for _ in range(REV_GAPFILL_MONTHS):
+        y, m = (y - 1, 12) if m == 1 else (y, m - 1)
+        labels.append((y, m))  # 申報月 (y, m) ↔ 營收月 = 前一個月
+    counts = revenue_month_counts(f"{labels[-1][0]:04d}-{labels[-1][1]:02d}-01")
+    full = max(counts.values(), default=0)
+    for ly, lm in labels:
+        label = f"{ly:04d}-{lm:02d}-01"
+        if full and counts.get(label, 0) >= full * REV_GAPFILL_RATIO:
+            continue
+        vy, vm = (ly - 1, 12) if lm == 1 else (ly, lm - 1)
+        gap = fetch_mops_monthly_revenue(vy, vm)
+        if gap.empty:
+            continue
+        gap = gap[gap["stock_id"].isin(keep)]
+        save_monthly_revenue_bulk(gap, fetched_date=None)  # 非即時抓到，公布日交給訊號端估計
+        logger.info(f"Revenue gap-fill {label}: had {counts.get(label, 0)}, fetched {len(gap)}.")
+
+
+def update_per(today, keep: set[str]) -> None:
+    """本益比：官方 bulk（TWSE BWIBBU_d + TPEx peQryDate）逐日補。
+
+    遷移到 bulk 時 PER 沒接替代來源，2026-05-05 起全市場凍結 → S4/S5 一直拿
+    舊 PER 過濾。起點用「最後一個全市場都有 PER 的日期」，自動回補整段缺口。
+    """
+    last_full = last_full_market_date("daily_per")
+    floor = today - timedelta(days=PER_BACKFILL_MAX_DAYS)
+    start = datetime.fromisoformat(last_full).date() + timedelta(days=1) if last_full else floor
+    start = max(min(start, today - timedelta(days=MIN_REFETCH_DAYS)), floor)
+    n = 0
+    for offset in range((today - start).days + 1):
+        dt = start + timedelta(days=offset)
+        if dt.weekday() >= 5:
+            continue
+        df = fetch_all_per_by_date(dt.isoformat())
+        if not df.empty:
+            df = df[df["stock_id"].isin(keep)]
+            save_per_bulk(df)
+            n += len(df)
+        time.sleep(0.5)
+    logger.info(f"PER bulk fill {start}..{today}: {n} rows.")
+
+
+def _latest_due_quarter(today) -> str:
+    """法定期限已過（+5 天緩衝給 FinMind 入庫）的最新一季季底日。
+    Q1→5/15、Q2→8/14、Q3→11/14、年報→隔年 3/31。"""
+    y = today.year
+    candidates = [
+        (datetime(y, 11, 19).date(), f"{y}-09-30"),
+        (datetime(y, 8, 19).date(),  f"{y}-06-30"),
+        (datetime(y, 5, 20).date(),  f"{y}-03-31"),
+        (datetime(y, 4, 5).date(),   f"{y - 1}-12-31"),
+    ]
+    for due, q in candidates:
+        if today >= due:
+            return q
+    return f"{y - 1}-09-30"
+
+
+def refresh_financials(today, all_stocks: list[str]) -> None:
+    """財報滾動刷新：最新季財報缺的股票，每次刷新 FIN_REFRESH_PER_RUN 檔。
+
+    舊流程只有 bootstrap（download_financial）抓一次，之後永不更新 → 2026Q1
+    只有 312 檔、Q2 0 檔，基本面濾網一直拿 2025Q4 在評分。
+    """
+    target = _latest_due_quarter(today)
+    retry_cutoff = (today - timedelta(days=FIN_RETRY_DAYS)).isoformat()
+    todo = stale_financial_stocks(all_stocks, target, retry_cutoff)
+    if not todo:
+        logger.info(f"Financials up to date through {target}.")
+        return
+    batch = todo[:FIN_REFRESH_PER_RUN]
+    logger.info(f"Financial refresh: {len(todo)} stocks lack {target}; refreshing {len(batch)}...")
+    fetch_start = (datetime.fromisoformat(target).date() - timedelta(days=400)).isoformat()
+    for sid in tqdm(batch, desc="Financial"):
+        for fn in (fetch_financial_statement, fetch_balance_sheet, fetch_cash_flow):
+            df = fn(sid, fetch_start)  # rate-limited inside _finmind()
+            if df is not None and not df.empty:
+                save_financial(sid, df)
+        mark_financial_attempt(sid, today.isoformat())
 
 
 def incremental_update(universe: pd.DataFrame) -> None:
@@ -136,19 +250,9 @@ def incremental_update(universe: pd.DataFrame) -> None:
             elif not inst.empty:
                 save_institutional(sid, inst)
 
-    # 月營收：每月 1～10 號補（法規要求 10 號前公布）。改用官方 MOPS opendata
-    # bulk（上市+上櫃各一次回傳全市場最新月）→ 免 token、無 FinMind 限流。
-    # 單月即可：YoY 由 opendata「去年同月增減(%)」直接帶，訊號不需更早歷史。
-    if today.day <= 10:
-        logger.info("Refreshing monthly revenue via official MOPS bulk (TWSE+TPEx)...")
-        rev = fetch_all_monthly_revenue()
-        if not rev.empty:
-            rev = rev[rev["stock_id"].isin(set(all_stocks))]
-            save_monthly_revenue_bulk(rev)
-            ym = rev["date"].iloc[0] if len(rev) else "—"
-            logger.info(f"Monthly revenue bulk: {len(rev)} rows (latest month {ym}).")
-        else:
-            logger.warning("Monthly revenue bulk returned empty — MOPS opendata unavailable")
+    update_monthly_revenue(today, set(all_stocks))
+    update_per(today, set(all_stocks))
+    refresh_financials(today, all_stocks)
 
     # Regime gauge 用的衍生資料（0056 + TX 期貨）— sync_db 會覆蓋 local，
     # 因此每次 incremental_update 都要重新補齊

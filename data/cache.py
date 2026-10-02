@@ -382,6 +382,30 @@ def save_financial(stock_id: str, df: pd.DataFrame) -> None:
         )
 
 
+def stale_financial_stocks(stock_ids: list[str], target_quarter: str,
+                           retry_cutoff: str) -> list[str]:
+    """最新財報季 < target_quarter、且最近（retry_cutoff 之後）沒嘗試過的股票，
+    最舊的排前面（落後最多的先補）。從沒有財報的股票排最後（多半是 ETF／無財報）。"""
+    with _conn() as con:
+        latest = dict(con.execute(
+            "SELECT stock_id, MAX(date) FROM financial WHERE type='EPS' GROUP BY stock_id"
+        ).fetchall())
+        tried = dict(con.execute(
+            "SELECT stock_id, last_date FROM fetch_log WHERE dataset='fin_try'"
+        ).fetchall())
+    todo = [s for s in stock_ids
+            if (latest.get(s) or "") < target_quarter
+            and (tried.get(s) or "") < retry_cutoff]
+    return sorted(todo, key=lambda s: (latest.get(s) is None, latest.get(s) or ""))
+
+
+def mark_financial_attempt(stock_id: str, day: str) -> None:
+    """記錄財報刷新嘗試日（fetch_log dataset='fin_try'），供重試間隔判斷。"""
+    with _conn() as con:
+        con.execute("INSERT OR REPLACE INTO fetch_log VALUES (?, 'fin_try', ?)",
+                    (stock_id, day))
+
+
 def load_financial(stock_id: str, type_filter: list[str] | None = None) -> pd.DataFrame:
     q = "SELECT * FROM financial WHERE stock_id=?"
     params: list = [stock_id]
@@ -418,16 +442,21 @@ def save_monthly_revenue(stock_id: str, df: pd.DataFrame) -> None:
         )
 
 
-def save_monthly_revenue_bulk(df: pd.DataFrame) -> None:
-    """批次寫入多檔最新月營收（官方 MOPS bulk）。語意同 save_prices_bulk。
+_TODAY = object()  # sentinel：fetched_date 預設用今天
+
+
+def save_monthly_revenue_bulk(df: pd.DataFrame, fetched_date=_TODAY) -> None:
+    """批次寫入多檔月營收（官方 MOPS bulk）。語意同 save_prices_bulk。
 
     df 欄位：stock_id, date, revenue, revenue_yoy。
+    fetched_date：預設今天（每日抓 = 實際可得日）；事後回補舊月份請傳 None，
+    否則「今天」會被當成公布日（訊號端遇 NULL 會退回法定公布日估計）。
     """
     if df.empty:
         return
     df = df.copy()
     df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
-    df["fetched_date"] = str(_date.today())
+    df["fetched_date"] = str(_date.today()) if fetched_date is _TODAY else fetched_date
     cols = ["stock_id", "date", "revenue", "revenue_yoy", "fetched_date"]
     df = df[cols]
     maxd = df.groupby("stock_id")["date"].max()
@@ -537,6 +566,50 @@ def load_per(stock_id: str, start: str = "2018-01-01", end: str = "") -> pd.Data
     if not df.empty:
         df["date"] = pd.to_datetime(df["date"])
     return df
+
+
+def save_per_bulk(df: pd.DataFrame) -> None:
+    """批次寫入多檔／多日本益比（官方 bulk）。df 欄位：stock_id, date, per, pbr, div_yield。"""
+    if df.empty:
+        return
+    df = df.copy()
+    df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
+    df = df[["stock_id", "date", "per", "pbr", "div_yield"]]
+    maxd = df.groupby("stock_id")["date"].max()
+    with _conn() as con:
+        df.to_sql("daily_per", con, if_exists="append", index=False,
+                  method=_insert_or_ignore)
+        con.executemany(
+            "INSERT INTO fetch_log(stock_id, dataset, last_date) VALUES (?, 'per', ?) "
+            "ON CONFLICT(stock_id, dataset) DO UPDATE SET last_date=excluded.last_date "
+            "WHERE excluded.last_date > fetch_log.last_date",
+            list(maxd.items())
+        )
+
+
+def last_full_market_date(table: str, min_rows: int = 500) -> str | None:
+    """table 中「全市場」都有資料的最後一天（單日筆數 ≥ min_rows）。
+
+    不能用 MAX(date)：個別股票零星補到的日期（例如 2026-06 的 FinMind 殘留）
+    會讓整體看起來是新的，掩蓋全市場其實已凍結數月。
+    """
+    assert table in ("daily_per", "daily_price", "institutional")
+    with _conn() as con:
+        row = con.execute(
+            f"SELECT MAX(date) FROM (SELECT date FROM {table} GROUP BY date "
+            f"HAVING COUNT(*) >= ?)", (min_rows,)
+        ).fetchone()
+    return row[0] if row and row[0] else None
+
+
+def revenue_month_counts(since: str) -> dict[str, int]:
+    """各申報月（date）的月營收筆數，用來找整月缺漏（例：2026-06 只有 1 筆）。"""
+    with _conn() as con:
+        rows = con.execute(
+            "SELECT date, COUNT(*) FROM monthly_revenue WHERE date>=? GROUP BY date",
+            (since,)
+        ).fetchall()
+    return {d: n for d, n in rows}
 
 
 def last_per_date(stock_id: str) -> str | None:
