@@ -100,3 +100,48 @@ def test_rules_message_reads_numbers_from_strategies():
     assert f"停損 −{s7['default_sl']:.0%}" in txt and f"最長 {s7['default_hold']} 天" in txt
     for tag in ("[S4]", "[S5]", "[S6]", "[S7]"):
         assert tag in txt
+
+
+# ─── 2026-10-04：候選名單＝追蹤名單、價格精度、出場合併、報告日 ─────────────────
+
+def test_finalize_drops_low_aqs_caps_s5_and_total(monkeypatch):
+    import screener.candidates as cand
+    monkeypatch.setattr(cand, "_mom20", lambda sid, date: -int(sid) / 1000)  # 代號小 = 動能強
+    rev = pd.DataFrame([_row(f"{i:04d}", aqs_score=60) for i in range(1, 31)])     # S5 一次 30 檔
+    acc = pd.DataFrame([_row("0001", aqs_score=40), _row("0100", aqs_score=80)])
+    out = cand.finalize_candidates({"revenue": rev, "accum": acc}, "2026-10-01")
+    assert out["revenue"]["stock_id"].tolist() == [f"{i:04d}" for i in range(1, 11)]   # S5 單日上限 10
+    assert "0001" not in set(out["accum"]["stock_id"])                                 # AQS 40 剔除
+    ids = set(out["revenue"]["stock_id"]) | set(out["accum"]["stock_id"])
+    assert len(ids) <= cand.MAX_CANDIDATES
+
+
+def test_finalize_keeps_rows_without_aqs(monkeypatch):
+    import screener.candidates as cand
+    monkeypatch.setattr(cand, "_mom20", lambda sid, date: 0.0)
+    out = cand.finalize_candidates({"long": pd.DataFrame([_row("2451")])}, "2026-10-01")
+    assert out["long"]["stock_id"].tolist() == ["2451"]
+
+
+@pytest.mark.parametrize("v,expected", [(24.85, "24.85"), (24.9, "24.90"), (132.5, "132.5"),
+                                        (3440, "3,440"), (float("nan"), "—")])
+def test_px_tick_aware(v, expected):
+    assert tg._px(v) == expected
+
+
+def test_exits_merged_per_stock():
+    ex = pd.DataFrame([
+        {"level": "⚠️ 注意", "stock_id": "3017", "name": "奇鋐", "strategy": "S6", "entry_date": "2026-08-06",
+         "entry_price": 2940.0, "close": 3440.0, "pnl_pct": 17.0, "reason": "近5日法人轉賣 1,225 張"},
+        {"level": "⚠️ 注意", "stock_id": "3017", "name": "奇鋐", "strategy": "S7", "entry_date": "2026-09-15",
+         "entry_price": 3115.0, "close": 3440.0, "pnl_pct": 10.4, "reason": "近5日法人轉賣 1,225 張"},
+    ])
+    m = tg.format_signals({"exits": ex}, "2026-10-02")[0]
+    assert m.count("3017") == 1 and "[S6+S7]" in m and "要處理</b>（1）" in m
+    assert m.count("近5日法人轉賣") == 1
+
+
+def test_report_date_uses_trade_date():
+    sig = {"_meta": pd.DataFrame([{"trade_date": "2026-10-02"}])}
+    assert tg.report_date(sig) == "2026-10-02"
+    assert "10/02（五）" in tg.format_signals(sig, tg.report_date(sig))[0]

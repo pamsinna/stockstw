@@ -59,7 +59,7 @@ def _mom20(stock_id: str, date: str) -> float:
     """過去 MOM_LOOKBACK 交易日報酬，供候選排序 + 弱動能標籤。取不到回 nan。"""
     try:
         start = (pd.Timestamp(date) - pd.Timedelta(days=90)).strftime("%Y-%m-%d")
-        px = load_prices(str(stock_id), start=start)
+        px = load_prices(str(stock_id), start=start, end=pd.Timestamp(date).strftime("%Y-%m-%d"))
         if px is None or px.empty or len(px) < MOM_LOOKBACK + 1:
             return float("nan")
         c = px.sort_values("date")["close"].to_numpy(dtype=float)
@@ -156,6 +156,19 @@ _TAG_ORDER = [("long", "S4"), ("revenue", "S5"), ("growth", "S6"), ("accum", "S7
 _WEEKDAY = "一二三四五六日"
 
 
+def _px(v) -> str:
+    """價格依台股升降單位顯示：< 50 元到 0.01、< 500 到 0.1、其餘整數。
+    舊版一律 .1f → 24.85→24.90 顯示成「24.9→24.9（+0.2%）」。"""
+    if v is None or pd.isna(v):
+        return "—"
+    v = float(v)
+    if v < 50:
+        return f"{v:,.2f}"
+    if v < 500:
+        return f"{v:,.1f}"
+    return f"{v:,.0f}"
+
+
 def _zhang(v: float) -> str:
     """股 → 張，帶正負號。"""
     if v is None or pd.isna(v):
@@ -204,7 +217,7 @@ def _candidate_line(i: int, r, names: dict[str, str]) -> str:
     f60 = r.get("f_60d", float("nan"))
     t60 = r.get("t_60d", float("nan"))
     inst60 = (0 if pd.isna(f60) else f60) + (0 if pd.isna(t60) else t60)
-    parts = [f"{i}. <b>{sid} {names.get(sid, '')}</b>  {r.get('close', '—')}  [{tags}{star}]"]
+    parts = [f"{i}. <b>{sid} {names.get(sid, '')}</b>  {_px(r.get('close'))}  [{tags}{star}]"]
     detail = []
     if any(t.startswith("S5") for t in r["tags"]) and not pd.isna(r.get("revenue_yoy", float("nan"))):
         detail.append(f"營收年增{r['revenue_yoy']:+.0f}%")
@@ -240,7 +253,7 @@ def _watch_section(watch: pd.DataFrame, names: dict[str, str]) -> list[str]:
             new = "🆕" if r["is_new"] else ""
             since = "" if r["is_new"] else f"（觸發後{r['since_pct']:+.0f}%）"
             lines.append(
-                f" {new}{r['stock_id']} {names.get(r['stock_id'], '')}  {r['close']:g}{since}"
+                f" {new}{r['stock_id']} {names.get(r['stock_id'], '')}  {_px(r['close'])}{since}"
                 f"  營收年增{r['burst_yoy']:+.0f}% 近3月{r['burst_g3']:+.0f}%  外資60日{_zhang(r['f_60d'])}"
             )
     if n_total > len(w):
@@ -295,13 +308,23 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
         exits = exits.assign(_o=exits["level"].map(lambda x: order.get(x, 2))).sort_values("_o")
         # 只有 🚨 出場才從進場候選拿掉（真矛盾）；⚠️ 注意可共存
         exit_ids = set(exits[exits["level"].astype(str).str.contains("出場")]["stock_id"].astype(str))
-        lines = [f"🚨 <b>要處理</b>（{len(exits)}）"]
-        for _, r in exits.iterrows():
+        # 同一檔跨策略（例：奇鋐 S6+S7）合併成一列：取最嚴重等級、最早進場
+        merged = []
+        for sid, g in exits.groupby(exits["stock_id"].astype(str), sort=False):
+            g = g.sort_values("entry_date")
+            first = g.iloc[0]
+            reasons = list(dict.fromkeys(str(x) for x in g["reason"] if str(x)))
+            merged.append({**first.to_dict(), "level": g.sort_values("_o").iloc[0]["level"],
+                           "strategy": "+".join(dict.fromkeys(g["strategy"].astype(str))),
+                           "reason": "；".join(reasons), "_o": g["_o"].min()})
+        merged = pd.DataFrame(merged).sort_values("_o")
+        lines = [f"🚨 <b>要處理</b>（{len(merged)}）"]
+        for _, r in merged.iterrows():
             sid = str(r["stock_id"])
             nm = r.get("name") or names.get(sid, "")
             lines.append(
                 f"{r['level']} <b>{sid} {nm}</b> [{r['strategy']}] "
-                f"{r['entry_date'][5:].replace('-', '/')}進 {r['entry_price']:.1f}→{r['close']:.1f}"
+                f"{str(r['entry_date'])[5:].replace('-', '/')}進 {_px(r['entry_price'])}→{_px(r['close'])}"
                 f"（{r['pnl_pct']:+.1f}%）\n   {r['reason']}"
             )
         blocks.append("\n".join(lines))
@@ -399,9 +422,20 @@ def send_rules(pin: bool = True) -> bool:
     return ok
 
 
-def notify(signals: dict[str, pd.DataFrame]) -> None:
+def report_date(signals: dict[str, pd.DataFrame]) -> str:
+    """報告日 = 資料的最後交易日（_meta.trade_date），不是程式跑完的時鐘時間。
+    GitHub cron 常延遲數小時，10/02 那批跑過午夜被標成「10/03（六）」。"""
+    meta = signals.get("_meta")
+    if meta is not None and not meta.empty and "trade_date" in meta.columns:
+        v = meta.iloc[0]["trade_date"]
+        if isinstance(v, str) and v:
+            return v
     from datetime import datetime
-    date = datetime.today().strftime("%Y-%m-%d")
+    return datetime.today().strftime("%Y-%m-%d")
+
+
+def notify(signals: dict[str, pd.DataFrame]) -> None:
+    date = report_date(signals)
     msgs = format_signals(signals, date)
     for msg in msgs:
         send_message(msg)

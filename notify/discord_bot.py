@@ -10,7 +10,7 @@ import requests
 import pandas as pd
 from dotenv import load_dotenv
 
-from notify.telegram_bot import format_signals
+from notify.telegram_bot import format_signals, report_date
 
 load_dotenv(override=True)
 logger = logging.getLogger(__name__)
@@ -67,8 +67,7 @@ def send_message(text: str) -> bool:
 
 
 def notify(signals: dict[str, pd.DataFrame]) -> None:
-    from datetime import datetime
-    date = datetime.today().strftime("%Y-%m-%d")
+    date = report_date(signals)
     msgs = format_signals(signals, date)
     for msg in msgs:
         send_message(msg)

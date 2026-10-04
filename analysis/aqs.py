@@ -25,6 +25,8 @@ from __future__ import annotations
 import sys
 import logging
 
+import pandas as pd
+
 from data.cache import init_db, load_prices, load_institutional
 from data.universe import build_universe
 from technical.indicators import add_all
@@ -32,16 +34,36 @@ from technical.indicators import add_all
 logger = logging.getLogger(__name__)
 
 
-def compute_aqs(stock_id: str, lookback: int = 60) -> dict | None:
-    """計算一支股票的 AQS + Stage。資料不足回 None。"""
-    price = load_prices(stock_id, start="2025-01-01")
-    inst = load_institutional(stock_id, start="2025-01-01")
-    if price.empty or len(price) < lookback:
-        return None
+def prepare_aqs_frame(stock_id: str, start: str = "2025-01-01", end: str = "") -> pd.DataFrame:
+    """AQS 需要的日頻資料（價量 + 指標 + 法人淨買）。可一次備好再逐日切片算。"""
+    price = load_prices(stock_id, start=start, end=end)
+    if price.empty:
+        return price
+    inst = load_institutional(stock_id, start=start)
     df = add_all(price.sort_values("date"))
     df = df.merge(inst, on="date", how="left", suffixes=("", "_i"))
     df["inst_net"] = df["foreign_"].fillna(0) + df["trust"].fillna(0)
     df["price_chg"] = df["close"].diff()
+    return df.reset_index(drop=True)
+
+
+def compute_aqs(stock_id: str, lookback: int = 60, asof: str | None = None) -> dict | None:
+    """計算一支股票的 AQS + Stage（asof 給日期 = 以該日收盤為準，供進場快照／回測）。
+    資料不足回 None。"""
+    if asof:
+        start = (pd.Timestamp(asof) - pd.Timedelta(days=300)).strftime("%Y-%m-%d")
+        df = prepare_aqs_frame(stock_id, start=start, end=asof)
+    else:
+        df = prepare_aqs_frame(stock_id)
+    if df.empty or len(df) < lookback:
+        return None
+    out = aqs_from_frame(df, lookback)
+    out["stock_id"] = stock_id
+    return out
+
+
+def aqs_from_frame(df: pd.DataFrame, lookback: int = 60) -> dict:
+    """以 df 最後一列為「今天」計算 AQS（df 需含 prepare_aqs_frame 的欄位）。"""
     last_row = df.iloc[-1]
     win = df.tail(lookback).reset_index(drop=True)
 
@@ -121,7 +143,6 @@ def compute_aqs(stock_id: str, lookback: int = 60) -> dict | None:
         verdict = "🚫 訊號不健康"
 
     return {
-        "stock_id": stock_id,
         "score": round(score, 1),
         "dim1_volprice": round(dim1, 1),
         "dim2_continuity": round(dim2, 1),

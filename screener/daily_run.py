@@ -378,9 +378,9 @@ def screen_today(universe: pd.DataFrame,
         # 60 日報酬率
         regime_60d_return = float(recent.iloc[-1]["close"] / recent.iloc[-61]["close"] - 1)
         if regime_60d_return >= 0.05:
-            regime_label = "🔥 多頭（S5 升級主力）"
+            regime_label = "🔥 多頭"
         elif regime_60d_return <= -0.05:
-            regime_label = "🥶 空頭（S5 暫停/減半）"
+            regime_label = "🥶 空頭"
         else:
             regime_label = "🟡 中性"
     logger.info(f"Regime gauge: {regime_label}  0050 60d return={regime_60d_return*100:+.1f}%")
@@ -473,8 +473,8 @@ def screen_today(universe: pd.DataFrame,
         logger.warning(f"Signal computation failed for {total} stocks ({breakdown})")
 
     # 對每個訊號補上 AQS（累積品質分）+ stage + verdict
-    # S4 (long), S6 (growth), S7 (accum), combo_47 都加 AQS 二次確認
-    for tf in ("long", "growth", "accum", "combo_47"):
+    # S4～S7、combo_47 都加 AQS（候選篩選 AQS<50 剔除、出場監控進場快照都用）
+    for tf in ("long", "revenue", "growth", "accum", "combo_47"):
         for row in results[tf]:
             sid = row["stock_id"]
             try:
@@ -495,6 +495,7 @@ def screen_today(universe: pd.DataFrame,
     out["_meta"] = pd.DataFrame([{
         "regime_label": regime_label,
         "regime_60d_return": regime_60d_return,
+        "trade_date": last_trading_day.strftime("%Y-%m-%d"),
     }])
     return out
 
@@ -557,15 +558,23 @@ def run_daily(notify_fn=None) -> dict | None:
     incremental_update(universe)
     signals = screen_today(universe)
 
-    today = datetime.now(_TZ).strftime("%Y-%m-%d")
+    # 報告日 = 資料最後交易日（cron 常延遲、跑過午夜會變成隔天甚至週六）
+    meta = signals.get("_meta", pd.DataFrame())
+    today = (meta.iloc[0]["trade_date"] if not meta.empty and "trade_date" in meta.columns
+             else datetime.now(_TZ).strftime("%Y-%m-%d"))
+
+    # 最終候選名單：通知顯示什麼、出場監控就追蹤什麼（AQS<50 剔除、S5 單日上限、總數上限）
+    from screener.candidates import finalize_candidates
+    signals = finalize_candidates(signals, today)
 
     # 訊號出場監控：記今日訊號 + 評估既有 open 訊號的籌碼出場（論點破壞才提醒）
     try:
-        from notify.exit_monitor import record_today, evaluate, _load
+        from notify.exit_monitor import record_today, evaluate, _load, prune_untracked
         if _load().empty:   # 首次上線：自動回填近 20 交易日，之後每日累積維護
             logger.info("Exit monitor: empty state → seeding last 20 trading days...")
             from scripts.seed_open_signals import seed
             seed(20)
+        prune_untracked()
         record_today(signals, today)
         signals["exits"] = evaluate(today)
     except Exception as e:

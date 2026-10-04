@@ -127,3 +127,22 @@ def test_retail_rising_recent_filters_noise():
     assert retail_rising_recent(noise) is False
     assert retail_rising_recent(real) is True
     assert retail_rising_recent(pd.DataFrame()) is False
+
+
+def test_prune_untracked_keeps_top_momentum(monkeypatch):
+    import pandas as pd
+    import notify.exit_monitor as em
+    import notify.telegram_bot as tg
+    rows = [{"entry_date": "2026-10-01", "stock_id": f"{i:04d}", "name": "", "strategy": "S5",
+             "entry_price": 10.0, "status": "open", "alert_level": "none", "exit_date": "",
+             "exit_reason": "", "pnl_pct": ""} for i in range(1, 13)]
+    rows.append({**rows[0], "stock_id": "9999", "strategy": "S7"})
+    state = {"log": pd.DataFrame(rows)}
+    monkeypatch.setattr(em, "_load", lambda: state["log"].copy())
+    monkeypatch.setattr(em, "_save", lambda df: state.update(log=df))
+    monkeypatch.setattr(tg, "_mom20", lambda sid, date: -int(sid))   # 代號小 = 動能強
+    assert em.prune_untracked() == 2
+    log = state["log"]
+    dropped = set(log[log.status == "not_notified"]["stock_id"])
+    assert dropped == {"0011", "0012"}
+    assert em.prune_untracked() == 0                                   # 冪等

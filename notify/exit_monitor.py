@@ -97,6 +97,38 @@ def record_today(signals: dict[str, pd.DataFrame], date: str) -> None:
         logger.info(f"Exit monitor: recorded {len(new)} new signals to track")
 
 
+# 舊通知每個策略區塊最多顯示 10 檔（S6 15 檔）；超過的根本沒出現在進場名單上
+_DISPLAY_CAP = {"S6": 15}
+_DISPLAY_CAP_DEFAULT = 10
+
+
+def prune_untracked() -> int:
+    """把「同日同策略超過通知顯示上限」的 open 訊號標成 not_notified、停止追蹤。
+
+    2026-10-01 S5 一次 73 檔，通知只顯示動能前 10，出場監控卻全記 → 隔天
+    對沒看過的股票發出場警報。依進場日當時的 20 日動能保留前 N（同舊通知排序），
+    其餘標記。冪等：之後候選名單已有上限（screener.candidates），不會再超過。
+    """
+    from notify.telegram_bot import _mom20
+    log = _load()
+    if log.empty:
+        return 0
+    n = 0
+    for (d, strat), g in log.groupby(["entry_date", "strategy"]):
+        cap = _DISPLAY_CAP.get(strat, _DISPLAY_CAP_DEFAULT)
+        if len(g) <= cap:
+            continue
+        mom = pd.Series({i: _mom20(str(r.stock_id), str(d)) for i, r in g.iterrows()})
+        keep = set(mom.sort_values(ascending=False, na_position="last").index[:cap])
+        drop = [i for i in g.index if i not in keep and log.at[i, "status"] == "open"]
+        log.loc[drop, "status"] = "not_notified"
+        n += len(drop)
+    if n:
+        _save(log)
+        logger.info(f"Exit monitor: {n} signals beyond display cap marked not_notified")
+    return n
+
+
 def classify(aqs: dict | None, foreign_10d: float | None, foreign_selldays: float | None,
              inst_5d: float | None, retail_rising: bool,
              foreign_10d_ratio: float | None = None) -> tuple[str, list[str]]:
