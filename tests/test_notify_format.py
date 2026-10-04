@@ -97,7 +97,10 @@ def test_rules_message_reads_numbers_from_strategies():
     from technical.signals import STRATEGIES
     txt = tg.rules_message()
     s7 = next(s for s in STRATEGIES if s["timeframe"] == "accum")
-    assert f"停損 −{s7['default_sl']:.0%}" in txt and f"最長 {s7['default_hold']} 天" in txt
+    s5 = next(s for s in STRATEGIES if s["timeframe"] == "revenue")
+    assert f"停損 −{s7['default_sl']:.0%}" in txt
+    assert f"最長 {s5['default_hold']} 天" in txt                  # 無 trailing → 天數上限生效
+    assert f"最長 {s7['default_hold']} 天" not in txt and "無天數上限" in txt   # trailing → 引擎不檢查天數
     for tag in ("[S4]", "[S5]", "[S6]", "[S7]"):
         assert tag in txt
 

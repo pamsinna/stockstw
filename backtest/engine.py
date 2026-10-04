@@ -151,7 +151,9 @@ def run_backtest(
             reason = ""
 
             if trail_trigger is not None:
-                # Trailing stop 模式：取代 take_profit
+                # Trailing stop 模式：取代 take_profit，且「不檢查 max_hold_days」。
+                # 刻意保留（2026-10 驗證）：S4/S6/S7 加上天數上限後樣本外每筆期望值
+                # S4 11.3→7.2%、S6 17.0→10.7%、S7 29.4→15.8% —— 策略靠讓贏家跑。
                 # peak_price 採「結算自上一根 bar 後」的值（不含當日 high）
                 trail_active = peak_price >= ep * (1 + trail_trigger)
                 if trail_active:

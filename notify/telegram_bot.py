@@ -304,9 +304,9 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
     exits = signals.get("exits", pd.DataFrame())
     exit_ids: set[str] = set()
     if isinstance(exits, pd.DataFrame) and not exits.empty:
-        order = {"🚨 出場": 0, "⚠️ 注意": 1}
-        exits = exits.assign(_o=exits["level"].map(lambda x: order.get(x, 2))).sort_values("_o")
-        # 只有 🚨 出場才從進場候選拿掉（真矛盾）；⚠️ 注意可共存
+        order = {"🚨 出場": 0, "📈 移動停利啟動": 1, "⚠️ 注意": 2}
+        exits = exits.assign(_o=exits["level"].map(lambda x: order.get(x, 3))).sort_values("_o")
+        # 只有 🚨 出場才從進場候選拿掉（真矛盾）；📈 移動停利啟動可共存
         exit_ids = set(exits[exits["level"].astype(str).str.contains("出場")]["stock_id"].astype(str))
         # 同一檔跨策略（例：奇鋐 S6+S7）合併成一列：取最嚴重等級、最早進場
         merged = []
@@ -324,7 +324,7 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
             nm = r.get("name") or names.get(sid, "")
             lines.append(
                 f"{r['level']} <b>{sid} {nm}</b> [{r['strategy']}] "
-                f"{str(r['entry_date'])[5:].replace('-', '/')}進 {_px(r['entry_price'])}→{_px(r['close'])}"
+                f"{str(r['entry_date'])[5:].replace('-', '/')}訊號 進{_px(r['entry_price'])}→{_px(r['close'])}"
                 f"（{r['pnl_pct']:+.1f}%）\n   {r['reason']}"
             )
         blocks.append("\n".join(lines))
@@ -376,10 +376,10 @@ def rules_message() -> str:
     def exit_rule(st) -> str:
         sl = f"停損 −{st['default_sl']:.0%}"
         if st.get("trail_trigger"):
+            # 引擎在 trailing 模式不檢查天數（回測：加天數上限 S4/S6/S7 樣本外都明顯變差）
             tp = f"漲 +{st['trail_trigger']:.0%} 後從高點回落 {st.get('trail_pct', 0.15):.0%} 出場"
-        else:
-            tp = f"停利 +{st['default_tp']:.0%}"
-        return f"{sl}｜{tp}｜最長 {st['default_hold']} 天"
+            return f"{sl}｜{tp}｜無天數上限"
+        return f"{sl}｜停利 +{st['default_tp']:.0%}｜最長 {st['default_hold']} 天"
 
     lines = ["📌 <b>策略規則對照</b>（每日通知只用標籤）"]
     for key, tag in _TAG_ORDER:
@@ -391,7 +391,9 @@ def rules_message() -> str:
         "S4* = 該策略不是今天、而是近 20 個交易日內觸發過",
         "動能 = 近 20 日漲跌；⚠️未表態 = 價格還沒動，可跳過",
         "👀 營收爆發觀察 = 不是進場訊號，題材與時機自己判斷",
-        "🚨 出場 / ⚠️ 注意 = 系統發過訊號的股票籌碼惡化（不是你的持股）",
+        "🚨 出場 = 系統發過的訊號觸及上面的停損／停利／移動停利／天數（與回測同一套規則；不是你的持股）",
+        "📈 移動停利啟動 = 漲幅已達門檻，之後跌破提示價就出場（只提醒一次）",
+        "進場價以訊號隔天開盤計；籌碼狀況只當參考，不觸發出場（回測：照籌碼出場平均少賺 6～15pp）",
         "\n紀律：連續虧損時不可修改參數。停損是策略的一部分，不是失敗。",
     ]
     return "\n".join(lines)

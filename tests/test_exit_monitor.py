@@ -146,3 +146,68 @@ def test_prune_untracked_keeps_top_momentum(monkeypatch):
     dropped = set(log[log.status == "not_notified"]["stock_id"])
     assert dropped == {"0011", "0012"}
     assert em.prune_untracked() == 0                                   # 冪等
+
+
+# ─── 出場＝策略原規則（2026-10 改版，用回測引擎判斷）──────────────────────────
+
+def _bars(closes, start="2026-06-01", highs=None, lows=None):
+    import pandas as pd
+    d = pd.bdate_range(start, periods=len(closes))
+    return pd.DataFrame({"date": d, "open": closes, "high": highs or closes,
+                         "low": lows or closes, "close": closes, "volume": 1e6})
+
+
+def test_rule_status_stop_loss_today_detected():
+    from notify.exit_monitor import rule_status
+    # S4：停損 10%。訊號第 15 根，隔天 100 進場，最後一天（今天）跌到 85 → 今天就要報
+    closes = [100.0] * 15 + [100.0, 99.0, 98.0, 85.0]
+    px = _bars(closes)
+    r = rule_status("X", "S4", px["date"].iloc[14].strftime("%Y-%m-%d"), px=px)
+    assert r["state"] == "exit" and r["reason"] == "stop_loss"
+    assert abs(r["exit_price"] - r["entry_price"] * 0.9) < 1e-6
+    assert r["exit_date"] == px["date"].iloc[-1]
+
+
+def test_rule_status_trailing_activation_and_open():
+    from notify.exit_monitor import rule_status
+    closes = [100.0] * 15 + [100.0, 110.0, 125.0, 124.0]   # +25% ≥ S4 trail_trigger 20%
+    px = _bars(closes)
+    r = rule_status("X", "S4", px["date"].iloc[14].strftime("%Y-%m-%d"), px=px)
+    assert r["state"] == "open" and r["trail_active"]
+    assert abs(r["trail_level"] - 125.0 * 0.85) < 1e-6
+
+
+def test_rule_status_signal_today_is_pending():
+    from notify.exit_monitor import rule_status
+    px = _bars([100.0] * 20)
+    assert rule_status("X", "S4", px["date"].iloc[-1].strftime("%Y-%m-%d"), px=px)["state"] == "pending"
+
+
+def test_rule_status_max_hold_exits_next_open():
+    # S5 沒有 trailing → 最長持有天數生效（S4/S6/S7 的 trailing 分支在引擎裡跳過了天數檢查）
+    from notify.exit_monitor import rule_status, _strategy_cfg
+    hold = _strategy_cfg("S5")["default_hold"]
+    n = hold // 7 * 5 + 30                                   # 足夠多交易日超過日曆天上限
+    px = _bars([100.0] * 15 + [100.5] * n)
+    r = rule_status("X", "S5", px["date"].iloc[14].strftime("%Y-%m-%d"), px=px)
+    assert r["state"] == "exit" and r["reason"] == "max_hold"
+
+
+def test_evaluate_reports_recent_exit_and_silences_old(monkeypatch):
+    import pandas as pd
+    import notify.exit_monitor as em
+    px = _bars([100.0] * 15 + [100.0, 85.0] + [86.0] * 10)        # 第 17 根就停損，之後橫盤 10 天
+    sig_day = px["date"].iloc[14].strftime("%Y-%m-%d")
+    row = {"entry_date": sig_day, "stock_id": "X", "name": "", "strategy": "S4", "entry_price": 100.0,
+           "status": "open", "alert_level": "none", "exit_date": "", "exit_reason": "", "pnl_pct": ""}
+    state = {"log": pd.DataFrame([row, {**row, "stock_id": "Y"}])}
+    monkeypatch.setattr(em, "_load", lambda: state["log"].astype(object))   # 同正式 _load
+    monkeypatch.setattr(em, "_save", lambda df: state.update(log=df))
+    monkeypatch.setattr(em, "load_prices", lambda sid, start="": px)
+    monkeypatch.setattr(em, "_chip_note", lambda sid: "")
+    today = px["date"].iloc[-1].strftime("%Y-%m-%d")
+    out = em.evaluate(today)                                       # 停損在 10 個交易日前 → 靜默
+    assert out.empty and (state["log"].status == "exited").all()
+    state["log"] = pd.DataFrame([row])
+    out = em.evaluate(px["date"].iloc[16].strftime("%Y-%m-%d"))   # 停損當天評估 → 要報
+    assert len(out) == 1 and out.iloc[0]["level"] == "🚨 出場" and "停損" in out.iloc[0]["reason"]

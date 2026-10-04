@@ -1,18 +1,22 @@
 """訊號出場監控 — 只追蹤「系統發過進場訊號」的股票（S4-S7），不碰個人 portfolio。
 
-設計：論點破壞才通知（籌碼/量價惡化），不做到價停利 / 到天數的硬出場。
-  🚨 出場：外資倒貨給散戶（外資賣超 + 散戶接手/法人紅旗）或 AQS 籌碼崩壞（派發）
-  ⚠️ 注意：買力轉弱（量價同向↓ / 近5日法人轉賣 / AQS 退化到末段）
+設計（2026-10 改版）：出場＝該策略回測用的同一套規則，直接用回測引擎判斷：
+  🚨 出場：觸及停損／停利／移動停利，或持有滿最長天數（次日開盤出）
+  📈 移動停利啟動：漲幅達 trail_trigger，之後改用「高點回落 trail_pct」出場（提醒一次）
+進場價 = 訊號日隔天開盤 + 滑價（同回測）。
 
-狀態存在 reports/open_signals.csv（append-only + status 更新），逐日去重：
-  🚨 發一次就標 exited、不再評估；⚠️ 只在 none→warn 首次轉換時發，不每日洗版。
+舊版用籌碼（AQS 派發／外資撤離／法人轉賣／買力轉弱）觸發出場；回測 851 筆
+S4～S7（2023-03～2026-09）疊加在策略原出場上，每一種都讓平均報酬掉 6～15pp
+（砍掉少數大贏家）→ 降為出場訊息裡的「籌碼參考」，不再觸發出場。
+
+狀態存在 open_signals 表（append-only + status 更新）；🚨 發一次就標 exited。
 """
 from __future__ import annotations
 
 import logging
 import pandas as pd
 
-from data.cache import (load_prices, load_institutional, load_shareholding, price_adjust_factor,
+from data.cache import (load_prices, load_institutional, load_shareholding,
                         load_universe, load_open_signals, save_open_signals)
 from analysis.aqs import compute_aqs
 
@@ -34,6 +38,7 @@ SELL_RATIO_5D    = -0.10        # 5 日(外資+投信)淨額 ÷ 5 日量 ≤ -10
 DIM1_WEAK        = 8.0          # AQS 量價同向 < 此 → 買力轉弱
 AQS_TRAP_SCORE   = 50          # score < 此且 dim4<0 → 派發 trap
 AGE_OUT_DAYS     = 365         # 追蹤上限（純衛生，靜默不通知）
+RECENT_EXIT_DAYS = 5           # 出場日早於此（日曆天）→ 靜默結案（改版首跑會清出一批舊單）
 RETAIL_RISE_MIN  = 0.30         # 散戶比例近月須上升 ≥0.3pp 才算「接手」（濾掉 ±0.1pp 噪音）
 
 
@@ -189,48 +194,132 @@ def _metrics(sid: str) -> dict:
             "retail_rising": retail_rising, "aqs": compute_aqs(sid)}
 
 
+_STRAT_CFG_KEY = {"S4": "long", "S5": "revenue", "S6": "growth", "S7": "accum",
+                  "S4∩S7": "long"}   # 高信心組合沿用主力 S4 的出場規則
+
+
+def _strategy_cfg(label: str) -> dict:
+    from technical.signals import STRATEGIES
+    key = _STRAT_CFG_KEY.get(label, "long")
+    return next(s for s in STRATEGIES if s["timeframe"] == key)
+
+
+def rule_status(sid: str, label: str, signal_date: str, px: pd.DataFrame | None = None) -> dict | None:
+    """用回測引擎判斷這筆訊號到今天為止的狀態（與回測同一套出場規則）。
+
+    回傳 {state: open|exit|pending, entry_price, close, pnl_pct, reason, exit_date, exit_price,
+          trail_active, trail_level}；資料不足回 None。
+    引擎只在「有下一根 K」時檢查出場 → 補一根明日佔位 K，讓今天的停損/停利也被檢查到；
+    持有到期這類「次日開盤出」的出場落在佔位 K 上 = 明日開盤出場。
+    """
+    from backtest.engine import run_backtest
+    st = _strategy_cfg(label)
+    sd = pd.Timestamp(signal_date)
+    if px is None:
+        px = load_prices(sid, start=(sd - pd.Timedelta(days=40)).strftime("%Y-%m-%d"))
+    if px is None or px.empty or not (px["date"] == sd).any():
+        return None
+    px = px.sort_values("date").reset_index(drop=True)
+    last = px.iloc[-1]
+    if last["date"] == sd:   # 訊號今天才發，還沒進場
+        return {"state": "pending"}
+    stub = {**last.to_dict(), "date": last["date"] + pd.Timedelta(days=1),
+            "open": last["close"], "high": last["close"], "low": last["close"], "volume": 0.0}
+    df = pd.concat([px, pd.DataFrame([stub])], ignore_index=True)
+    df["_sig"] = df["date"] == sd
+    res = run_backtest(df, "_sig", st["default_tp"], st["default_sl"], st["default_hold"],
+                       df["date"].min().strftime("%Y-%m-%d"), stub["date"].strftime("%Y-%m-%d"),
+                       sid, trail_trigger=st.get("trail_trigger"), trail_pct=st.get("trail_pct", 0.15))
+    if not res.trades:
+        return None
+    t = res.trades[0]
+    held = px[px["date"] >= t.entry_date]
+    peak = float(max(t.entry_price, held["high"].max())) if not held.empty else t.entry_price
+    trail = st.get("trail_trigger")
+    out = {"entry_price": t.entry_price, "entry_date": t.entry_date, "close": float(last["close"]),
+           "trail_active": bool(trail and peak >= t.entry_price * (1 + trail)),
+           "trail_level": peak * (1 - st.get("trail_pct", 0.15)), "peak": peak,
+           "stop_price": t.entry_price * (1 - st["default_sl"]), "cfg": st}
+    if t.exit_reason == "end_of_period":
+        out.update(state="open", pnl_pct=(last["close"] / t.entry_price - 1) * 100)
+        return out
+    tomorrow = t.exit_date == stub["date"]
+    out.update(state="exit", reason=t.exit_reason, exit_price=float(t.exit_price),
+               exit_date=None if tomorrow else t.exit_date, pnl_pct=t.pnl_pct * 100)
+    return out
+
+
+def _exit_reason_text(r: dict) -> str:
+    from notify.telegram_bot import _px
+    st, why = r["cfg"], r["reason"]
+    when = "明日開盤" if r["exit_date"] is None else f"{r['exit_date']:%m/%d}"
+    if why == "stop_loss":
+        return f"觸及停損 −{st['default_sl']:.0%}（{when} {_px(r['exit_price'])}）"
+    if why == "take_profit":
+        return f"達停利 +{st['default_tp']:.0%}（{when} {_px(r['exit_price'])}）"
+    if why == "trailing_stop":
+        return (f"移動停利：高點 {_px(r['peak'])} 回落 {st.get('trail_pct', 0.15):.0%}"
+                f"（{when} {_px(r['exit_price'])}）")
+    if why == "max_hold":
+        return f"持有滿 {st['default_hold']} 天 → {when}出場"
+    return why
+
+
+def _chip_note(sid: str) -> str:
+    """籌碼狀況只當參考（回測：照籌碼出場會少賺 6～15pp）。"""
+    try:
+        m = _metrics(sid)
+        if not m:
+            return ""
+        level, reasons = classify(m["aqs"], m["foreign_10d"], m["foreign_selldays"],
+                                  m["inst_5d"], m["retail_rising"],
+                                  foreign_10d_ratio=m.get("foreign_10d_ratio"))
+        return "" if level == "✅ 持有" else "籌碼參考：" + "；".join(reasons)
+    except Exception:
+        return ""
+
+
 def evaluate(date: str) -> pd.DataFrame:
-    """評估所有 open 訊號，更新 log，回傳「今天要通知」的列（新 🚨 + 新 ⚠️）。"""
+    """評估所有 open 訊號（策略原規則），更新 log，回傳今天要通知的列。"""
     log = _load()
     if log.empty:
         return pd.DataFrame()
     today = pd.Timestamp(date)
     out = []
+    n_stale = 0
     for i, row in log[log.status == "open"].iterrows():
         sid = str(row["stock_id"])
-        # 今天剛記錄的訊號不評估出場（不可能同日進、同日出）
-        if (today - pd.Timestamp(row["entry_date"])).days < 1:
-            continue
-        # 衛生：追蹤過久靜默移除
         if (today - pd.Timestamp(row["entry_date"])).days > AGE_OUT_DAYS:
             log.at[i, "status"] = "aged_out"
             continue
-        m = _metrics(sid)
-        if not m:
+        r = rule_status(sid, str(row["strategy"]), str(row["entry_date"]))
+        if not r or r["state"] == "pending":
             continue
-        entry = float(row["entry_price"]) or m["close"]
-        # 進場後若有分割／減資，進場價換到現在的價格基準（否則一拆三會被當成 −66%）
-        entry *= price_adjust_factor(sid, str(row["entry_date"]))
-        pnl = (m["close"] / entry - 1) * 100 if entry else 0.0
-        level, reasons = classify(m["aqs"], m["foreign_10d"], m["foreign_selldays"],
-                                  m["inst_5d"], m["retail_rising"],
-                                  foreign_10d_ratio=m.get("foreign_10d_ratio"))
-        rec = {"level": level, "stock_id": sid, "name": row["name"],
-               "strategy": row["strategy"], "entry_date": row["entry_date"],
-               "entry_price": entry, "close": m["close"], "pnl_pct": round(pnl, 1),
-               "reason": "；".join(reasons)}
-        if level == "🚨 出場":
+        base = {"stock_id": sid, "name": row["name"], "strategy": row["strategy"],
+                "entry_date": row["entry_date"], "entry_price": r["entry_price"],
+                "close": r["close"], "pnl_pct": round(r["pnl_pct"], 1)}
+        if r["state"] == "exit":
+            reason = _exit_reason_text(r)
+            stale = r["exit_date"] is not None and (today - r["exit_date"]).days > RECENT_EXIT_DAYS
+            note = _chip_note(sid)
             log.at[i, "status"] = "exited"
-            log.at[i, "exit_date"] = date
-            log.at[i, "exit_reason"] = rec["reason"]
-            log.at[i, "pnl_pct"] = round(pnl, 1)
-            out.append(rec)
-        elif level == "⚠️ 注意":
-            if row["alert_level"] != "warn":   # 只在首次轉入 ⚠️ 時通知
-                log.at[i, "alert_level"] = "warn"
-                out.append(rec)
-        else:  # ✅ 持有：籌碼回穩則重置 ⚠️ 狀態，之後再惡化可再提醒
-            if row["alert_level"] == "warn":
-                log.at[i, "alert_level"] = "none"
+            log.at[i, "exit_date"] = (r["exit_date"].strftime("%Y-%m-%d") if r["exit_date"] is not None
+                                      else "next_open")
+            log.at[i, "exit_reason"] = reason
+            log.at[i, "pnl_pct"] = round(r["pnl_pct"], 1)
+            if stale:   # 改版前就已觸及（例：舊籌碼規則時代的單），靜默結案不洗版
+                n_stale += 1
+                continue
+            out.append({**base, "close": r["exit_price"], "level": "🚨 出場",
+                        "reason": reason + (f"\n   {note}" if note else "")})
+        elif r["trail_active"] and row["alert_level"] != "trail":
+            from notify.telegram_bot import _px
+            log.at[i, "alert_level"] = "trail"
+            out.append({**base, "level": "📈 移動停利啟動",
+                        "reason": f"跌破 {_px(r['trail_level'])} 出場（高點 {_px(r['peak'])} 回落 "
+                                  f"{r['cfg'].get('trail_pct', 0.15):.0%}）"})
     _save(log)
+    if n_stale:
+        logger.info(f"Exit monitor: {n_stale} signals had already exited > {RECENT_EXIT_DAYS}d ago "
+                    "(closed silently)")
     return pd.DataFrame(out)
