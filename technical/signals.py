@@ -618,6 +618,95 @@ def signal_revenue_burst(df: pd.DataFrame,
     return df
 
 
+# ─── 法人佈局雷達（前瞻追蹤用，不是進場訊號，不在 STRATEGIES）─────────────────
+# 2026-10-05：用戶初衷「找法人提前佈局、股價還沒反映的股票」。條件事前定死
+# （LAYOUT_RULES_VERSION），不拿歷史資料調參，只做前瞻追蹤：每天記錄名單，
+# 看 20／60 日後 vs 0050 含息（scripts/radar_scorecard.py）。
+# 依據：投信預測力 > 外資，但單獨用輸大盤 → 當濾網、營收動能當主軸（與本系統
+# 組合層回測「唯一三段 alpha 皆正的是 S5 營收動能」一致）；接近 52 週高點比
+# 遠離高點更能預測後續報酬（George & Hwang 2004）→「還沒動」= 法人進場後沒漲多、
+# 距高點 5～20%，不是跌深。
+LAYOUT_RULES_VERSION = "R1-2026-10-05"
+LAYOUT = {
+    "trust_consec_min": 3,       # 投信連買天數
+    "rev_yoy_min": 15.0,         # 最新已公布月營收年增 %
+    "since_start_max": 8.0,      # 投信連買起點至今漲幅上限 %
+    "ex20_lo": -3.0, "ex20_hi": 5.0,   # 近 20 日 vs 0050 超額報酬 %
+    "dist52_lo": 5.0, "dist52_hi": 20.0,  # 距 52 週高點 %
+}
+
+
+def layout_radar_today(df: pd.DataFrame, inst_df: pd.DataFrame | None,
+                       rev_df: pd.DataFrame | None, bench_close: pd.Series,
+                       sh_df: pd.DataFrame | None = None) -> dict | None:
+    """今天（df 最後一列）是否符合法人佈局雷達；符合回傳明細 dict，否則 None。
+
+    df: 日 K（已還原）；inst_df: 法人（股數）；rev_df: 月營收；bench_close: 0050 收盤
+    （date index）；sh_df: 集保週資料（retail_pct），可無。
+    """
+    L = LAYOUT
+    if inst_df is None or inst_df.empty or rev_df is None or rev_df.empty or len(df) < 250:
+        return None
+    d = df.sort_values("date").reset_index(drop=True)
+    d = d.merge(inst_df[["date", "trust"]], on="date", how="left")
+    trust = d["trust"].fillna(0)
+    # 1) 投信連買
+    streak = 0
+    for v in trust.iloc[::-1]:
+        if v > 0:
+            streak += 1
+        else:
+            break
+    if streak < L["trust_consec_min"] or trust.tail(20).sum() <= 0:
+        return None
+    # 2) 營收動能（最新一筆已公布）
+    rev = rev_df.sort_values("date").copy()
+    rev["publish_date"] = _publish_dates(rev)
+    today = d["date"].iloc[-1]
+    rev = rev[rev["publish_date"] <= today]
+    if rev.empty:
+        return None
+    rv = pd.to_numeric(rev["revenue"], errors="coerce")
+    yoy = rv.pct_change(12) * 100
+    if "revenue_yoy" in rev.columns:
+        yoy = pd.to_numeric(rev["revenue_yoy"], errors="coerce").fillna(yoy)
+    last_yoy = yoy.iloc[-1]
+    if pd.isna(last_yoy) or last_yoy < L["rev_yoy_min"]:
+        return None
+    # 3) 股價還沒反映
+    close = d["close"]
+    c = float(close.iloc[-1])
+    start_close = float(close.iloc[-streak - 1])           # 連買起點前一天收盤
+    since = (c / start_close - 1) * 100
+    b = bench_close.reindex(d["date"]).ffill()
+    if len(d) < 21 or pd.isna(b.iloc[-21]) or pd.isna(b.iloc[-1]):
+        return None
+    ex20 = ((c / close.iloc[-21]) - (b.iloc[-1] / b.iloc[-21])) * 100
+    high52 = float(close.tail(250).max())
+    dist = (1 - c / high52) * 100
+    ma60 = float(close.tail(60).mean())
+    if not (since < L["since_start_max"] and L["ex20_lo"] <= ex20 <= L["ex20_hi"]
+            and L["dist52_lo"] <= dist <= L["dist52_hi"] and c > ma60):
+        return None
+    # 4) 散戶沒在接（有資料才判斷）
+    retail_chg = float("nan")
+    if sh_df is not None and len(sh_df) >= 2:
+        sh = sh_df.sort_values("date")
+        sh = sh[sh["date"] < today]                          # 集保週末才公布 → 只用已公布的週
+        if len(sh) >= 2:
+            retail_chg = float(sh["retail_pct"].iloc[-1] - sh["retail_pct"].iloc[-2])
+            if retail_chg > 0:
+                return None
+    total_shares = (float(sh_df["total_shares"].iloc[-1])
+                    if sh_df is not None and not sh_df.empty else float("nan"))
+    return {"close": c, "trust_days": streak, "trust_20d": float(trust.tail(20).sum()),
+            "since_start_pct": since, "ex20_pct": ex20, "dist52_pct": dist,
+            "rev_yoy": float(last_yoy), "retail_wchg": retail_chg,
+            "mktcap": c * total_shares if total_shares == total_shares else float("nan"),
+            "trust_20d_pct_shares": (float(trust.tail(20).sum()) / total_shares * 100
+                                     if total_shares and total_shares == total_shares else float("nan"))}
+
+
 # ─── 全策略清單（供批次回測用）────────────────────────────────────────────────
 
 # 規則凍結版本：從這一版起，實盤訊號才算「真正的樣本外」（2023-25 已被反覆用來做決策）。

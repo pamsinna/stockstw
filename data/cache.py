@@ -756,6 +756,34 @@ def load_open_signals() -> pd.DataFrame:
     return df
 
 
+def save_radar_log(df: pd.DataFrame) -> None:
+    """法人佈局雷達每日名單（前瞻追蹤用）。同 (date, stock_id) 不重複寫。"""
+    from technical.signals import LAYOUT_RULES_VERSION
+    cols = ["date", "stock_id", "close", "trust_days", "trust_20d", "since_start_pct", "ex20_pct",
+            "dist52_pct", "rev_yoy", "retail_wchg"]
+    df = df.copy()
+    df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
+    df = df[[c for c in cols if c in df.columns]].assign(rules_version=LAYOUT_RULES_VERSION)
+    with _conn() as con:
+        con.execute("""CREATE TABLE IF NOT EXISTS radar_log (
+            date TEXT NOT NULL, stock_id TEXT NOT NULL, close REAL, trust_days REAL, trust_20d REAL,
+            since_start_pct REAL, ex20_pct REAL, dist52_pct REAL, rev_yoy REAL, retail_wchg REAL,
+            rules_version TEXT, PRIMARY KEY (date, stock_id))""")
+        df.to_sql("radar_log", con, if_exists="append", index=False, method=_insert_or_ignore)
+
+
+def load_radar_log() -> pd.DataFrame:
+    with _conn() as con:
+        try:
+            df = pd.read_sql("SELECT * FROM radar_log ORDER BY date", con)
+        except Exception:
+            return pd.DataFrame()
+    if not df.empty:
+        df["date"] = pd.to_datetime(df["date"])
+        df["stock_id"] = df["stock_id"].astype(str)
+    return df
+
+
 def save_open_signals(df: pd.DataFrame) -> None:
     """整表覆寫追蹤狀態。"""
     with _conn() as con:

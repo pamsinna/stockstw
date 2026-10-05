@@ -20,7 +20,7 @@ from data.cache import (
     last_full_market_date, revenue_month_counts,
     stale_financial_stocks, mark_financial_attempt,
     last_price_date, last_institutional_date, earliest_last_date_since,
-    mark_fetch_skip, load_shareholding_latest,
+    mark_fetch_skip, load_shareholding_latest, load_shareholding, save_radar_log,
     save_shareholding, last_shareholding_date,
     save_futures_inst, last_futures_inst_date,
 )
@@ -39,6 +39,7 @@ from technical.signals import (
     signal_growth_breakout,
     signal_accumulation_eve,
     signal_revenue_burst,
+    layout_radar_today,
     STRATEGIES,
 )
 from analysis.aqs import compute_aqs
@@ -83,6 +84,8 @@ FIN_REFRESH_PER_RUN = 150
 FIN_RETRY_DAYS = 5
 # 觀察名單（營收爆發）回看窗：近 20 交易日內觸發過都列，今日新觸發標 🆕
 WATCH_WINDOW = 20
+# 法人佈局雷達顯示／記錄上限（實測近 40 交易日平均每天 ~1 檔、最多 4 檔）
+RADAR_MAX = 10
 
 
 def update_monthly_revenue(today, keep: set[str]) -> None:
@@ -300,7 +303,7 @@ def screen_today(universe: pd.DataFrame,
     timeframe: "short", "swing", "long"
     """
     results: dict[str, list] = {"long": [], "revenue": [], "growth": [], "accum": [], "combo_47": [],
-                                "watch": []}
+                                "watch": [], "radar": []}
     market_map = dict(zip(universe["stock_id"], universe["market"]))
     industry_map = (dict(zip(universe["stock_id"], universe["industry"]))
                     if "industry" in universe.columns else {})
@@ -349,6 +352,7 @@ def screen_today(universe: pd.DataFrame,
 
     # 用 0050 最後資料日當「本日交易日」基準：只對資料已更新至此日的股票產生訊號
     taiex_price = load_prices(TAIEX_PROXY, start="2024-01-01")
+    bench_close = taiex_price.set_index("date")["close"] if not taiex_price.empty else pd.Series(dtype=float)
     last_trading_day = taiex_price["date"].max() if not taiex_price.empty else pd.Timestamp("2000-01-01")
     logger.info(f"Latest trading day (0050): {last_trading_day.date()}")
 
@@ -361,7 +365,7 @@ def screen_today(universe: pd.DataFrame,
             f"🚨 資料過期：代理 {TAIEX_PROXY} 最新 {last_trading_day.date()}，落後現實 "
             f"{proxy_stale_days} 天（> {MAX_PROXY_STALE_DAYS}）— 中止選股，不發訊號"
         )
-        out = {k: pd.DataFrame() for k in ("long", "revenue", "growth", "accum", "combo_47", "watch")}
+        out = {k: pd.DataFrame() for k in ("long", "revenue", "growth", "accum", "combo_47", "watch", "radar")}
         out["_meta"] = pd.DataFrame([{
             "regime_label": f"🚨 資料過期 {proxy_stale_days} 天，已暫停選股",
             "regime_60d_return": 0.0,
@@ -431,6 +435,12 @@ def screen_today(universe: pd.DataFrame,
             w = _watch_row(sid, market, industry_map.get(sid, ""), df_b, inst)
             if w:
                 results["watch"].append(w)
+
+            # 法人佈局雷達（前瞻追蹤，不是進場訊號；條件凍結 LAYOUT_RULES_VERSION）
+            rd = layout_radar_today(price, inst_arg, rev_arg, bench_close, load_shareholding(sid))
+            if rd:
+                results["radar"].append({"stock_id": sid, "market": market,
+                                         "industry": industry_map.get(sid, ""), "vol_ratio": 0.0, **rd})
 
             # 策略六：高成長突破（需基本面 pass，loose market filter）
             if sid in fund_ok:
@@ -566,6 +576,17 @@ def run_daily(notify_fn=None) -> dict | None:
     # 最終候選名單：通知顯示什麼、出場監控就追蹤什麼（AQS<50 剔除、S5 單日上限、總數上限）
     from screener.candidates import finalize_candidates
     signals = finalize_candidates(signals, today)
+
+    # 法人佈局雷達：顯示前 RADAR_MAX 檔（投信 20 日買超佔股本由高到低），顯示什麼就記什麼
+    radar = signals.get("radar", pd.DataFrame())
+    if radar is not None and not radar.empty:
+        radar = (radar.sort_values("trust_20d_pct_shares", ascending=False, na_position="last")
+                 .head(RADAR_MAX).reset_index(drop=True))
+        signals["radar"] = radar
+        try:
+            save_radar_log(radar.assign(date=today))
+        except Exception as e:
+            logger.warning(f"Radar log failed: {e}")
 
     # 訊號出場監控：記今日訊號 + 評估既有 open 訊號的籌碼出場（論點破壞才提醒）
     try:

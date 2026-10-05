@@ -145,3 +145,52 @@ def test_revenue_burst_triggers_on_first_breakout_after_publish():
     assert pd.Timestamp("2024-04-15") in hits
     assert all(d >= pd.Timestamp("2024-02-10") for d in hits)          # 不早於公布日
     assert out.loc[out["date"] == "2024-04-15", "burst_yoy"].iloc[0] > 50
+
+
+# ─── 法人佈局雷達（條件凍結 R1）────────────────────────────────────────────────
+
+def _radar_inputs(trust_last=(1, 1, 1, 1), last_move=1.0, retail=(30.0, 29.8), yoy=30.0):
+    import numpy as np
+    dates = pd.bdate_range("2025-06-02", periods=300)
+    # 先漲到 120、回檔到 100，最後 60 天緩升到 108（距 52 週高 10%、站上季線、近 20 日小漲）
+    path = np.r_[np.linspace(80, 120, 200), np.linspace(120, 100, 40), np.linspace(100, 108, 60)]
+    path[-1] = path[-2] * last_move
+    price = pd.DataFrame({"date": dates, "open": path, "high": path, "low": path, "close": path,
+                          "volume": 1e6})
+    trust = np.zeros(300)
+    trust[-len(trust_last):] = trust_last
+    trust[-len(trust_last) - 1] = -1                        # 連買起點前一天是賣
+    inst = pd.DataFrame({"date": dates, "foreign_": 0.0, "trust": np.array(trust) * 1e5, "dealer": 0.0})
+    labels = pd.date_range("2024-06-01", "2026-07-01", freq="MS")
+    rev = pd.DataFrame({"date": labels, "revenue": 100.0, "revenue_yoy": yoy})
+    bench = pd.Series(100.0, index=dates)
+    sh = pd.DataFrame({"date": [dates[-12], dates[-6]], "retail_pct": list(retail),
+                       "total_shares": [1e8, 1e8]})
+    return price, inst, rev, bench, sh
+
+
+def test_layout_radar_hits_when_all_conditions_hold():
+    from technical.signals import layout_radar_today
+    r = layout_radar_today(*_radar_inputs())
+    assert r is not None and r["trust_days"] == 4
+    assert 5 <= r["dist52_pct"] <= 20 and r["since_start_pct"] < 8 and r["retail_wchg"] < 0
+
+
+@pytest.mark.parametrize("kw", [
+    {"trust_last": (1, 1)},          # 投信只連買 2 天
+    {"last_move": 1.12},             # 投信進場後已漲 12%
+    {"retail": (30.0, 30.5)},        # 散戶比例上升（在接）
+    {"yoy": 5.0},                    # 營收年增不夠
+])
+def test_layout_radar_rejects(kw):
+    from technical.signals import layout_radar_today
+    assert layout_radar_today(*_radar_inputs(**kw)) is None
+
+
+def test_layout_radar_ignores_unpublished_revenue():
+    from technical.signals import layout_radar_today
+    price, inst, rev, bench, sh = _radar_inputs(yoy=5.0)
+    # 最新一筆（申報月在價格最後一天之後）年增很高，但還沒公布 → 不能用
+    rev = pd.concat([rev, pd.DataFrame({"date": [price["date"].iloc[-1] + pd.offsets.MonthBegin(1)],
+                                        "revenue": [300.0], "revenue_yoy": [200.0]})])
+    assert layout_radar_today(price, inst, rev, bench, sh) is None

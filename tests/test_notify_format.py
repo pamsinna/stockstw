@@ -148,3 +148,26 @@ def test_report_date_uses_trade_date():
     sig = {"_meta": pd.DataFrame([{"trade_date": "2026-10-02"}])}
     assert tg.report_date(sig) == "2026-10-02"
     assert "10/02（五）" in tg.format_signals(sig, tg.report_date(sig))[0]
+
+
+def test_radar_section_rendered_between_candidates_and_watch():
+    radar = pd.DataFrame([{"stock_id": "2379", "industry": "半導體業", "close": 760.0, "trust_days": 4,
+                           "trust_20d": 2_000_000.0, "trust_20d_pct_shares": 0.55, "since_start_pct": 0.66,
+                           "ex20_pct": -0.05, "dist52_pct": 15.6, "rev_yoy": 28.1, "retail_wchg": -0.25}])
+    watch = pd.DataFrame([{"stock_id": "6933", "industry": "電腦及週邊設備業", "close": 371.0, "since_pct": 7.0,
+                           "is_new": False, "burst_yoy": 191.0, "burst_g3": 108.0, "f_60d": 1_655_000.0}])
+    m = tg.format_signals({"long": pd.DataFrame([_row("2451")]), "radar": radar, "watch": watch},
+                          "2026-10-02")[0]
+    assert m.index("新進場候選") < m.index("法人佈局雷達") < m.index("營收爆發觀察")
+    assert "投信連買4天" in m and "0.55%股本" in m and "作帳" in m      # 10 月 → 作帳期提醒
+
+
+def test_radar_scorecard_dedups_repeat_listings():
+    import importlib.util, pathlib
+    spec = importlib.util.spec_from_file_location(
+        "rs", pathlib.Path(__file__).resolve().parents[1] / "scripts" / "radar_scorecard.py")
+    rs = importlib.util.module_from_spec(spec); spec.loader.exec_module(rs)
+    days = pd.bdate_range("2026-10-06", periods=40)
+    log = pd.DataFrame({"date": [days[0], days[1], days[5], days[25]], "stock_id": ["A", "A", "B", "A"]})
+    ep = rs.episodes(log, days)
+    assert list(zip(ep["stock_id"], ep["date"])) == [("A", days[0]), ("B", days[5]), ("A", days[25])]

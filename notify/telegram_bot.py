@@ -233,6 +233,29 @@ def _candidate_line(i: int, r, names: dict[str, str]) -> str:
     return line
 
 
+def _radar_section(radar: pd.DataFrame, names: dict[str, str], date: str) -> list[str]:
+    """法人佈局雷達：投信開始連買 + 營收動能 + 股價還沒反映（條件凍結，前瞻追蹤中）。"""
+    if radar is None or radar.empty:
+        return []
+    lines = [f"🎯 <b>法人佈局雷達</b>（{len(radar)}）",
+             "<i>投信開始連買＋營收年增≥15%＋股價還沒反映；前瞻追蹤中，不是進場訊號</i>"]
+    if pd.Timestamp(date).month in (10, 11, 12):
+        lines.append("<i>⚠️ 10～12 月投信作帳期：作帳前常先結帳，投信連賣 ≥2 天＝開始調節</i>")
+    for _, r in radar.iterrows():
+        sid = str(r["stock_id"])
+        pct = r.get("trust_20d_pct_shares", float("nan"))
+        pct_s = f"（{pct:.2f}%股本）" if not _isnan(pct) else ""
+        rw = r.get("retail_wchg", float("nan"))
+        rw_s = f"散戶週{rw:+.2f}pp" if not _isnan(rw) else "散戶—"
+        lines.append(
+            f"\n<b>{sid} {names.get(sid, '')}</b>  {_px(r['close'])}  [{r.get('industry', '')}]\n"
+            f"   投信連買{int(r['trust_days'])}天 20日{_zhang(r['trust_20d'])}{pct_s}\n"
+            f"   投信進場後{r['since_start_pct']:+.1f}%｜距52週高{r['dist52_pct']:.0f}%｜"
+            f"營收年增{r['rev_yoy']:+.0f}%｜{rw_s}"
+        )
+    return lines
+
+
 def _watch_section(watch: pd.DataFrame, names: dict[str, str]) -> list[str]:
     """觀察名單：依產業分組（檔數多的族群在前），組內 🆕 優先、再按觸發後漲幅。"""
     if watch is None or watch.empty:
@@ -343,6 +366,11 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
         if long_df is not None and not long_df.empty:
             _append_signal_log(long_df[~long_df["stock_id"].astype(str).isin(exit_ids)], date)
 
+    # ── 🎯 法人佈局雷達 ────────────────────────────────────────────────────
+    r_lines = _radar_section(signals.get("radar", pd.DataFrame()), names, date)
+    if r_lines:
+        blocks.append("\n".join(r_lines))
+
     # ── 👀 觀察名單 ────────────────────────────────────────────────────────
     w_lines = _watch_section(signals.get("watch", pd.DataFrame()), names)
     if w_lines:
@@ -390,6 +418,8 @@ def rules_message() -> str:
         "\n⭐ = 兩個以上策略同時看好（回測只有 S4+S7 證實勝率較高：66% vs 57%）",
         "S4* = 該策略不是今天、而是近 20 個交易日內觸發過",
         "動能 = 近 20 日漲跌；⚠️未表態 = 價格還沒動，可跳過",
+        "🎯 法人佈局雷達 = 投信連買≥3天＋營收年增≥15%＋投信進場後漲<8%、近20日超額−3～+5%、"
+        "距52週高5～20%、站上季線、散戶沒增加。條件凍結、前瞻追蹤中，不是進場訊號",
         "👀 營收爆發觀察 = 不是進場訊號，題材與時機自己判斷",
         "🚨 出場 = 系統發過的訊號觸及上面的停損／停利／移動停利／天數（與回測同一套規則；不是你的持股）",
         "📈 移動停利啟動 = 漲幅已達門檻，之後跌破提示價就出場（只提醒一次）",
