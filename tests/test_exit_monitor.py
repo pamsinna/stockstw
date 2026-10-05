@@ -164,7 +164,7 @@ def test_rule_status_stop_loss_today_detected():
     px = _bars(closes)
     r = rule_status("X", "S4", px["date"].iloc[14].strftime("%Y-%m-%d"), px=px)
     assert r["state"] == "exit" and r["reason"] == "stop_loss"
-    assert abs(r["exit_price"] - r["entry_price"] * 0.9) < 1e-6
+    assert r["exit_price"] == 85.0          # 開盤 85 已跳空穿過停損價 90.09 → 用開盤價成交
     assert r["exit_date"] == px["date"].iloc[-1]
 
 

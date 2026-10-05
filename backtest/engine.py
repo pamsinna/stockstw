@@ -71,6 +71,15 @@ class BacktestResult:
         return pd.DataFrame(rows)
 
 
+def _stop_fill(stop_price: float, day_open: float) -> float:
+    """停損／移動停利的成交價：開盤就跳空穿過停損價 → 只能用開盤價賣。
+
+    舊版一律用停損價成交；實測 S4～S7 停損類出場有 22% 是開盤跳空穿價，
+    每次平均多賠 2.5%（平均每筆交易高估約 0.4pp）。
+    """
+    return min(stop_price, day_open) if day_open > 0 else stop_price
+
+
 def run_backtest(
     price_df: pd.DataFrame,
     signal_col: str,
@@ -159,10 +168,10 @@ def run_backtest(
                 if trail_active:
                     trail_level = peak_price * (1 - trail_pct)
                     if row["low"] <= trail_level:
-                        exit_price = trail_level
+                        exit_price = _stop_fill(trail_level, row["open"])
                         reason = "trailing_stop"
                 if exit_price is None and sl_hit:
-                    exit_price = ep * (1 - stop_loss)
+                    exit_price = _stop_fill(ep * (1 - stop_loss), row["open"])
                     reason = "stop_loss"
             elif sl_hit and tp_hit:
                 # Both triggered intraday — daily OHLCV can't tell which fired
@@ -173,10 +182,10 @@ def run_backtest(
                     exit_price = ep * (1 + take_profit)
                     reason = "take_profit"
                 else:
-                    exit_price = ep * (1 - stop_loss)
+                    exit_price = _stop_fill(ep * (1 - stop_loss), row["open"])
                     reason = "stop_loss"
             elif sl_hit:
-                exit_price = ep * (1 - stop_loss)
+                exit_price = _stop_fill(ep * (1 - stop_loss), row["open"])
                 reason = "stop_loss"
             elif tp_hit:
                 exit_price = ep * (1 + take_profit)

@@ -224,3 +224,15 @@ def test_open_trade_force_closed_at_end_of_period(handcrafted_price_with_signal)
     assert len(result.trades) == 1
     assert result.trades[0].exit_reason == "end_of_period"
     assert result.trades[0].exit_price == pytest.approx(111.0)
+
+
+def test_stop_loss_gap_down_fills_at_open(handcrafted_price_with_signal):
+    """開盤就跳空跌破停損價 → 用開盤價成交，不是停損價（舊版高估）。"""
+    df = handcrafted_price_with_signal.copy()
+    i = df.index[df["signal"]][0] + 2          # 進場隔天
+    df.loc[i, ["open", "high", "low", "close"]] = [80.0, 81.0, 79.0, 80.0]
+    result = run_backtest(df, "signal", take_profit=0.99, stop_loss=0.05, max_hold_days=999,
+                          start=str(df["date"].min().date()), end=str(df["date"].max().date()))
+    trade = result.trades[0]
+    assert trade.exit_reason == "stop_loss"
+    assert trade.exit_price == pytest.approx(80.0)
