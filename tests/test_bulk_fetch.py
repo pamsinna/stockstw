@@ -430,3 +430,23 @@ def test_quarters_to_refresh(day, expected):
     from datetime import date
     from screener.daily_run import _quarters_to_refresh
     assert _quarters_to_refresh(date.fromisoformat(day)) == expected
+
+
+def test_mops_statement_retries_after_refused(monkeypatch):
+    calls = {"n": 0}
+
+    class R:
+        encoding = "utf-8"
+
+        def __init__(self, text):
+            self.text = text
+
+    def post(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ConnectionError("Connection refused")
+        return R(_FIN_HTML)
+    monkeypatch.setattr(fetcher._session, "post", post)
+    monkeypatch.setattr(fetcher.time, "sleep", lambda s: None)
+    df = fetcher.fetch_mops_statement("t163sb04", 2026, 2)
+    assert "2330" in set(df["stock_id"]) and calls["n"] == 3   # sii 失敗一次＋重試成功，otc 一次

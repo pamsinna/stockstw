@@ -366,22 +366,39 @@ def _parse_mops_fin_html(html: str, ep: str) -> pd.DataFrame:
     return df[df["stock_id"].str.fullmatch(r"\d{4}")].drop_duplicates("stock_id")
 
 
+MOPS_RETRY_WAITS = (15, 30, 45)   # 秒；MOPS 會對雲端 IP 連續請求直接拒絕連線
+MOPS_GAP_SEC = 3.0
+
+
 def fetch_mops_statement(ep: str, year: int, quarter: int) -> pd.DataFrame:
-    """單一報表、單季、上市＋上櫃全市場（寬表，原始單位）。"""
+    """單一報表、單季、上市＋上櫃全市場（寬表，原始單位）。
+
+    GitHub Actions 上實測 MOPS 會間歇性 Connection refused（本地正常）→ 失敗就退避重試；
+    整季都抓不到時呼叫端的覆蓋率檢查會讓下一個排程再補。
+    """
     parts = []
     for typek in ("sii", "otc"):
-        try:
-            r = _session.post(MOPS_FIN_URL.format(ep=ep), timeout=60, data={
-                "encodeURIComponent": 1, "step": 1, "firstin": 1, "off": 1, "isQuery": "Y",
-                "TYPEK": typek, "year": str(year - 1911), "season": f"{quarter:02d}"})
-            r.encoding = "utf-8"
-            df = _parse_mops_fin_html(r.text, ep)
-        except Exception as e:
-            logger.warning(f"MOPS {ep} {typek} {year}Q{quarter} failed: {e}")
-            continue
+        df = pd.DataFrame()
+        for attempt in range(len(MOPS_RETRY_WAITS) + 1):
+            try:
+                r = _session.post(MOPS_FIN_URL.format(ep=ep), timeout=60, data={
+                    "encodeURIComponent": 1, "step": 1, "firstin": 1, "off": 1, "isQuery": "Y",
+                    "TYPEK": typek, "year": str(year - 1911), "season": f"{quarter:02d}"})
+                r.encoding = "utf-8"
+                df = _parse_mops_fin_html(r.text, ep)
+                # 有表＝成功（含「該季尚無資料」）；被擋時回的是錯誤頁、沒有任何公司表
+                if not df.empty or "查無" in r.text or "無資料" in r.text:
+                    break
+                err = "no table (throttled?)"
+            except Exception as e:
+                err = str(e)[:120]
+            if attempt < len(MOPS_RETRY_WAITS):
+                time.sleep(MOPS_RETRY_WAITS[attempt])
+        else:
+            logger.warning(f"MOPS {ep} {typek} {year}Q{quarter} failed after retries: {err}")
         if not df.empty:
             parts.append(df)
-        time.sleep(1.0)   # MOPS 對頻繁請求敏感
+        time.sleep(MOPS_GAP_SEC)
     return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
 
 
