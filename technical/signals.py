@@ -649,7 +649,10 @@ STRATEGIES = [
         "default_tp": 0.40, "default_sl": 0.12, "default_hold": 120,
         "needs_revenue": True,
         "needs_per": True,
-        "needs_fundamental": True,
+        # 實盤 S5 一直沒套基本面閘門；回測卻有 → 兩邊不是同一個策略。2026-10 組合層
+        # 回測（point-in-time）：不設閘門 alpha IS +16.0% / OOS +12.4% / 2026 +2.5%，
+        # 設閘門 −1.2% / +14.5% / −9.2% → 回測改成跟實盤一致（不設）。
+        "needs_fundamental": False,
     },
     {
         "name": "高成長突破",
