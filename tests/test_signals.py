@@ -194,3 +194,13 @@ def test_layout_radar_ignores_unpublished_revenue():
     rev = pd.concat([rev, pd.DataFrame({"date": [price["date"].iloc[-1] + pd.offsets.MonthBegin(1)],
                                         "revenue": [300.0], "revenue_yoy": [200.0]})])
     assert layout_radar_today(price, inst, rev, bench, sh) is None
+
+
+def test_foreign_layout_candidate_uses_foreign_flow_not_trust():
+    from technical.signals import layout_radar_foreign_candidate, foreign_flow_ratio
+    price, inst, rev, bench, sh = _radar_inputs(trust_last=(0, 0, 0, 0))   # 投信完全沒買
+    inst["foreign_"] = 50_000.0                                             # 外資天天買
+    r = layout_radar_foreign_candidate(price, inst, rev, bench, sh)
+    assert r is not None and r["foreign_ratio"] == foreign_flow_ratio(price, inst) > 0
+    inst["foreign_"] = -50_000.0                                            # 外資賣 → 不是候選
+    assert layout_radar_foreign_candidate(price, inst, rev, bench, sh) is None

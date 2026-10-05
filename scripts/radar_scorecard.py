@@ -1,4 +1,4 @@
-"""法人佈局雷達的前瞻成績單：名單出現後 20／60 個交易日的表現 vs 同期 0050 含息。
+"""法人佈局雷達（投信版 R1／外資版 F1）的前瞻成績單：名單出現後 20／60 個交易日的表現 vs 同期 0050 含息。
 
 條件凍結（LAYOUT_RULES_VERSION），不拿歷史資料調參；這份成績單就是唯一的驗證。
 
@@ -22,7 +22,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from backtest.portfolio import benchmark_0050  # noqa: E402
 from config import FEE_RATE_BUY, FEE_RATE_SELL, TAX_TWSE_OTC  # noqa: E402
 from data.cache import load_prices, load_radar_log  # noqa: E402
-from technical.signals import LAYOUT_RULES_VERSION  # noqa: E402
+from technical.signals import LAYOUT_RULES_VERSION, FOREIGN_LAYOUT_RULES_VERSION  # noqa: E402
+
+VARIANTS = {"trust": ("🎯 投信版", LAYOUT_RULES_VERSION),
+            "foreign": ("🌐 外資版", FOREIGN_LAYOUT_RULES_VERSION)}
 
 HORIZONS = (20, 60)
 DEDUP_DAYS = 20
@@ -44,11 +47,13 @@ def episodes(log: pd.DataFrame, trade_days: pd.DatetimeIndex) -> pd.DataFrame:
     return pd.DataFrame(keep)
 
 
-def scorecard() -> pd.DataFrame:
-    log = load_radar_log()
+def scorecard(variant: str = "trust") -> pd.DataFrame:
+    log = load_radar_log(variant)
     if log.empty:
         return pd.DataFrame()
-    log = log[log["rules_version"] == LAYOUT_RULES_VERSION]
+    log = log[log["rules_version"] == VARIANTS[variant][1]]
+    if log.empty:
+        return pd.DataFrame()
     bench = benchmark_0050(log["date"].min().strftime("%Y-%m-%d"),
                            pd.Timestamp.today().strftime("%Y-%m-%d"))
     days = bench.index
@@ -76,20 +81,21 @@ def scorecard() -> pd.DataFrame:
 
 def main() -> None:
     logging.basicConfig(level=logging.WARNING)
-    df = scorecard()
-    print(f"法人佈局雷達成績單 — {LAYOUT_RULES_VERSION}")
-    if df.empty:
-        print("尚無資料（名單從規則凍結後開始累積）")
-        return
-    print(f"上榜事件 {len(df)} 筆（同檔 {DEDUP_DAYS} 交易日內重複只算一次）")
-    for h in HORIZONS:
-        x = df.dropna(subset=[f"{h}d%"])
-        if x.empty:
-            print(f"  {h} 日：尚未有到期的事件")
+    for variant, (label, ver) in VARIANTS.items():
+        df = scorecard(variant)
+        print(f"\n{label}法人佈局雷達成績單 — {ver}")
+        if df.empty:
+            print("  尚無資料（名單從規則凍結後開始累積）")
             continue
-        ex = x[f"{h}d%"] - x[f"0050_{h}d%"]
-        print(f"  {h} 日：已到期 {len(x)} 筆｜平均 {x[f'{h}d%'].mean():+.2f}%  中位數 {x[f'{h}d%'].median():+.2f}%"
-              f"｜同期 0050 {x[f'0050_{h}d%'].mean():+.2f}%｜超額平均 {ex.mean():+.2f}%  贏 0050 比例 {(ex > 0).mean()*100:.0f}%")
+        print(f"  上榜事件 {len(df)} 筆（同檔 {DEDUP_DAYS} 交易日內重複只算一次）")
+        for h in HORIZONS:
+            x = df.dropna(subset=[f"{h}d%"])
+            if x.empty:
+                print(f"  {h} 日：尚未有到期的事件")
+                continue
+            ex = x[f"{h}d%"] - x[f"0050_{h}d%"]
+            print(f"  {h} 日：已到期 {len(x)} 筆｜平均 {x[f'{h}d%'].mean():+.2f}%  中位數 {x[f'{h}d%'].median():+.2f}%"
+                  f"｜同期 0050 {x[f'0050_{h}d%'].mean():+.2f}%｜超額平均 {ex.mean():+.2f}%  贏 0050 比例 {(ex > 0).mean()*100:.0f}%")
 
 
 if __name__ == "__main__":

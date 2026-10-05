@@ -10,6 +10,7 @@ import logging
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
@@ -39,6 +40,9 @@ from technical.signals import (
     signal_accumulation_eve,
     signal_revenue_burst,
     layout_radar_today,
+    layout_radar_foreign_candidate,
+    foreign_flow_ratio,
+    FOREIGN_TOP_PCT,
     STRATEGIES,
 )
 from analysis.aqs import compute_aqs
@@ -348,7 +352,7 @@ def screen_today(universe: pd.DataFrame,
     timeframe: "short", "swing", "long"
     """
     results: dict[str, list] = {"long": [], "revenue": [], "growth": [], "accum": [], "combo_47": [],
-                                "watch": [], "radar": []}
+                                "watch": [], "radar": [], "radar_f": []}
     market_map = dict(zip(universe["stock_id"], universe["market"]))
     industry_map = (dict(zip(universe["stock_id"], universe["industry"]))
                     if "industry" in universe.columns else {})
@@ -410,7 +414,7 @@ def screen_today(universe: pd.DataFrame,
             f"🚨 資料過期：代理 {TAIEX_PROXY} 最新 {last_trading_day.date()}，落後現實 "
             f"{proxy_stale_days} 天（> {MAX_PROXY_STALE_DAYS}）— 中止選股，不發訊號"
         )
-        out = {k: pd.DataFrame() for k in ("long", "revenue", "growth", "accum", "combo_47", "watch", "radar")}
+        out = {k: pd.DataFrame() for k in ("long", "revenue", "growth", "accum", "combo_47", "watch", "radar", "radar_f")}
         out["_meta"] = pd.DataFrame([{
             "regime_label": f"🚨 資料過期 {proxy_stale_days} 天，已暫停選股",
             "regime_60d_return": 0.0,
@@ -435,6 +439,7 @@ def screen_today(universe: pd.DataFrame,
     logger.info(f"Regime gauge: {regime_label}  0050 60d return={regime_60d_return*100:+.1f}%")
 
     stale_cutoff = pd.Timestamp(datetime.now(_TZ).date()) - pd.Timedelta(days=15)  # ~10 交易日
+    foreign_ratios: dict[str, float] = {}
     signal_errors: dict[str, int] = {}  # exception class → count
 
     for sid in tqdm(universe["stock_id"], desc="Screen"):
@@ -482,10 +487,17 @@ def screen_today(universe: pd.DataFrame,
                 results["watch"].append(w)
 
             # 法人佈局雷達（前瞻追蹤，不是進場訊號；條件凍結 LAYOUT_RULES_VERSION）
-            rd = layout_radar_today(price, inst_arg, rev_arg, bench_close, load_shareholding(sid))
+            sh_sid = load_shareholding(sid)
+            rd = layout_radar_today(price, inst_arg, rev_arg, bench_close, sh_sid)
             if rd:
                 results["radar"].append({"stock_id": sid, "market": market,
                                          "industry": industry_map.get(sid, ""), "vol_ratio": 0.0, **rd})
+            # 外資版（F1）：先收全市場外資買超比例，迴圈後再取前 FOREIGN_TOP_PCT%
+            foreign_ratios[sid] = foreign_flow_ratio(price, inst_arg)
+            fd = layout_radar_foreign_candidate(price, inst_arg, rev_arg, bench_close, sh_sid)
+            if fd:
+                results["radar_f"].append({"stock_id": sid, "market": market,
+                                           "industry": industry_map.get(sid, ""), "vol_ratio": 0.0, **fd})
 
             # 策略六：高成長突破（需基本面 pass，loose market filter）
             if sid in fund_ok:
@@ -526,6 +538,12 @@ def screen_today(universe: pd.DataFrame,
         total = sum(signal_errors.values())
         breakdown = ", ".join(f"{cls}={n}" for cls, n in sorted(signal_errors.items()))
         logger.warning(f"Signal computation failed for {total} stocks ({breakdown})")
+
+    # 外資版雷達：外資 20 日買超比例排全市場前 FOREIGN_TOP_PCT%
+    fr = pd.Series(foreign_ratios).dropna()
+    if not fr.empty and results["radar_f"]:
+        cut = float(np.percentile(fr, 100 - FOREIGN_TOP_PCT))
+        results["radar_f"] = [r for r in results["radar_f"] if r["foreign_ratio"] >= cut]
 
     # 對每個訊號補上 AQS（累積品質分）+ stage + verdict
     # S4～S7、combo_47 都加 AQS（候選篩選 AQS<50 剔除、出場監控進場快照都用）
@@ -649,6 +667,15 @@ def run_daily(notify_fn=None) -> dict | None:
             save_radar_log(radar.assign(date=today))
         except Exception as e:
             logger.warning(f"Radar log failed: {e}")
+    radar_f = signals.get("radar_f", pd.DataFrame())
+    if radar_f is not None and not radar_f.empty:
+        radar_f = (radar_f.sort_values("foreign_ratio", ascending=False)
+                   .head(RADAR_MAX).reset_index(drop=True))
+        signals["radar_f"] = radar_f
+        try:
+            save_radar_log(radar_f.assign(date=today), variant="foreign")
+        except Exception as e:
+            logger.warning(f"Foreign radar log failed: {e}")
 
     # 訊號出場監控：記今日訊號 + 評估既有 open 訊號的籌碼出場（論點破壞才提醒）
     try:

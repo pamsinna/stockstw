@@ -636,33 +636,14 @@ LAYOUT = {
 }
 
 
-def layout_radar_today(df: pd.DataFrame, inst_df: pd.DataFrame | None,
-                       rev_df: pd.DataFrame | None, bench_close: pd.Series,
-                       sh_df: pd.DataFrame | None = None) -> dict | None:
-    """今天（df 最後一列）是否符合法人佈局雷達；符合回傳明細 dict，否則 None。
-
-    df: 日 K（已還原）；inst_df: 法人（股數）；rev_df: 月營收；bench_close: 0050 收盤
-    （date index）；sh_df: 集保週資料（retail_pct），可無。
-    """
+def _layout_common(d: pd.DataFrame, rev_df: pd.DataFrame, bench_close: pd.Series,
+                   sh_df: pd.DataFrame | None, since: float) -> dict | None:
+    """兩版雷達共用：營收動能＋股價還沒反映＋散戶沒在接。d 已排序（含 date/close）。"""
     L = LAYOUT
-    if inst_df is None or inst_df.empty or rev_df is None or rev_df.empty or len(df) < 250:
-        return None
-    d = df.sort_values("date").reset_index(drop=True)
-    d = d.merge(inst_df[["date", "trust"]], on="date", how="left")
-    trust = d["trust"].fillna(0)
-    # 1) 投信連買
-    streak = 0
-    for v in trust.iloc[::-1]:
-        if v > 0:
-            streak += 1
-        else:
-            break
-    if streak < L["trust_consec_min"] or trust.tail(20).sum() <= 0:
-        return None
-    # 2) 營收動能（最新一筆已公布）
+    today = d["date"].iloc[-1]
+    # 營收動能（最新一筆已公布）
     rev = rev_df.sort_values("date").copy()
     rev["publish_date"] = _publish_dates(rev)
-    today = d["date"].iloc[-1]
     rev = rev[rev["publish_date"] <= today]
     if rev.empty:
         return None
@@ -673,11 +654,9 @@ def layout_radar_today(df: pd.DataFrame, inst_df: pd.DataFrame | None,
     last_yoy = yoy.iloc[-1]
     if pd.isna(last_yoy) or last_yoy < L["rev_yoy_min"]:
         return None
-    # 3) 股價還沒反映
+    # 股價還沒反映
     close = d["close"]
     c = float(close.iloc[-1])
-    start_close = float(close.iloc[-streak - 1])           # 連買起點前一天收盤
-    since = (c / start_close - 1) * 100
     b = bench_close.reindex(d["date"]).ffill()
     if len(d) < 21 or pd.isna(b.iloc[-21]) or pd.isna(b.iloc[-1]):
         return None
@@ -688,7 +667,7 @@ def layout_radar_today(df: pd.DataFrame, inst_df: pd.DataFrame | None,
     if not (since < L["since_start_max"] and L["ex20_lo"] <= ex20 <= L["ex20_hi"]
             and L["dist52_lo"] <= dist <= L["dist52_hi"] and c > ma60):
         return None
-    # 4) 散戶沒在接（有資料才判斷）
+    # 散戶沒在接（有資料才判斷）
     retail_chg = float("nan")
     if sh_df is not None and len(sh_df) >= 2:
         sh = sh_df.sort_values("date")
@@ -699,12 +678,77 @@ def layout_radar_today(df: pd.DataFrame, inst_df: pd.DataFrame | None,
                 return None
     total_shares = (float(sh_df["total_shares"].iloc[-1])
                     if sh_df is not None and not sh_df.empty else float("nan"))
-    return {"close": c, "trust_days": streak, "trust_20d": float(trust.tail(20).sum()),
-            "since_start_pct": since, "ex20_pct": ex20, "dist52_pct": dist,
-            "rev_yoy": float(last_yoy), "retail_wchg": retail_chg,
-            "mktcap": c * total_shares if total_shares == total_shares else float("nan"),
-            "trust_20d_pct_shares": (float(trust.tail(20).sum()) / total_shares * 100
-                                     if total_shares and total_shares == total_shares else float("nan"))}
+    return {"close": c, "since_start_pct": since, "ex20_pct": ex20, "dist52_pct": dist,
+            "rev_yoy": float(last_yoy), "retail_wchg": retail_chg, "total_shares": total_shares,
+            "mktcap": c * total_shares if total_shares == total_shares else float("nan")}
+
+
+def layout_radar_today(df: pd.DataFrame, inst_df: pd.DataFrame | None,
+                       rev_df: pd.DataFrame | None, bench_close: pd.Series,
+                       sh_df: pd.DataFrame | None = None) -> dict | None:
+    """投信版（R1）：今天（df 最後一列）是否符合；符合回傳明細 dict，否則 None。
+
+    df: 日 K（已還原）；inst_df: 法人（股數）；rev_df: 月營收；bench_close: 0050 收盤
+    （date index）；sh_df: 集保週資料（retail_pct），可無。
+    """
+    L = LAYOUT
+    if inst_df is None or inst_df.empty or rev_df is None or rev_df.empty or len(df) < 250:
+        return None
+    d = df.sort_values("date").reset_index(drop=True)
+    d = d.merge(inst_df[["date", "trust"]], on="date", how="left")
+    trust = d["trust"].fillna(0)
+    streak = 0
+    for v in trust.iloc[::-1]:
+        if v > 0:
+            streak += 1
+        else:
+            break
+    if streak < L["trust_consec_min"] or trust.tail(20).sum() <= 0:
+        return None
+    since = (float(d["close"].iloc[-1]) / float(d["close"].iloc[-streak - 1]) - 1) * 100  # 連買起點前一天收盤起算
+    out = _layout_common(d, rev_df, bench_close, sh_df, since)
+    if out is None:
+        return None
+    t20 = float(trust.tail(20).sum())
+    sh_ = out.pop("total_shares")
+    return {**out, "trust_days": streak, "trust_20d": t20,
+            "trust_20d_pct_shares": t20 / sh_ * 100 if sh_ and sh_ == sh_ else float("nan")}
+
+
+# ─── 外資版法人佈局雷達（F1，與投信版並行前瞻追蹤）─────────────────────────────
+# 2026-10-05 研究（2020～2026 每 5 日截面）：外資 20 日買超/成交量 IC 2023-25 +0.009、
+# 2026 +0.045（t=2.2），投信 20 日 IC 三段皆略負 → 加一個只把「投信連買」換成
+# 「外資 20 日買超佔成交量排全市場前 20%」的版本，其餘條件相同，用前瞻成績比較。
+FOREIGN_LAYOUT_RULES_VERSION = "F1-2026-10-05"
+FOREIGN_TOP_PCT = 20.0   # 全市場外資 20 日買超比例前 N%
+
+
+def foreign_flow_ratio(df: pd.DataFrame, inst_df: pd.DataFrame | None) -> float:
+    """近 20 日外資淨買超 ÷ 近 20 日成交量（全市場排名用）。"""
+    if inst_df is None or inst_df.empty or len(df) < 20:
+        return float("nan")
+    d = df.sort_values("date").tail(20).merge(inst_df[["date", "foreign_"]], on="date", how="left")
+    vol = float(d["volume"].sum())
+    return float(d["foreign_"].fillna(0).sum()) / vol if vol > 0 else float("nan")
+
+
+def layout_radar_foreign_candidate(df: pd.DataFrame, inst_df: pd.DataFrame | None,
+                                   rev_df: pd.DataFrame | None, bench_close: pd.Series,
+                                   sh_df: pd.DataFrame | None = None) -> dict | None:
+    """外資版：除了「排名前 20%」之外的條件（排名要等全市場算完，由呼叫端套）。"""
+    if inst_df is None or inst_df.empty or rev_df is None or rev_df.empty or len(df) < 250:
+        return None
+    ratio = foreign_flow_ratio(df, inst_df)
+    if not ratio > 0:
+        return None
+    d = df.sort_values("date").reset_index(drop=True)
+    since = (float(d["close"].iloc[-1]) / float(d["close"].iloc[-21]) - 1) * 100   # 外資買超這 20 日的漲幅
+    out = _layout_common(d, rev_df, bench_close, sh_df, since)
+    if out is None:
+        return None
+    out.pop("total_shares")
+    f20 = float(inst_df.merge(d[["date"]].tail(20), on="date")["foreign_"].fillna(0).sum())
+    return {**out, "foreign_ratio": ratio, "foreign_20d": f20}
 
 
 # ─── 全策略清單（供批次回測用）────────────────────────────────────────────────

@@ -450,3 +450,16 @@ def test_mops_statement_retries_after_refused(monkeypatch):
     monkeypatch.setattr(fetcher.time, "sleep", lambda s: None)
     df = fetcher.fetch_mops_statement("t163sb04", 2026, 2)
     assert "2330" in set(df["stock_id"]) and calls["n"] == 3   # sii 失敗一次＋重試成功，otc 一次
+
+
+def test_radar_logs_are_separate_per_variant(temp_db):
+    row = pd.DataFrame([{"date": "2026-10-06", "stock_id": "2379", "close": 760.0, "since_start_pct": 1.0,
+                         "ex20_pct": 0.0, "dist52_pct": 15.0, "rev_yoy": 28.0, "retail_wchg": -0.1,
+                         "trust_days": 4, "trust_20d": 1e6}])
+    cache.save_radar_log(row)
+    cache.save_radar_log(row.drop(columns=["trust_days", "trust_20d"]).assign(foreign_ratio=0.05,
+                                                                              foreign_20d=2e6), variant="foreign")
+    t, f = cache.load_radar_log(), cache.load_radar_log("foreign")
+    assert len(t) == 1 and len(f) == 1                       # 同一檔同一天兩版都記得到
+    assert t.iloc[0]["rules_version"].startswith("R1") and f.iloc[0]["rules_version"].startswith("F1")
+    assert f.iloc[0]["foreign_ratio"] == 0.05

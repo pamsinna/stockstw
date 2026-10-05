@@ -254,3 +254,11 @@ def test_watch_list_shows_everything_no_file_reference():
     m = "\n".join(tg.format_signals({"watch": pd.DataFrame(rows)}, "2026-10-05"))
     assert all(f"{1000 + i}" in m for i in range(40))
     assert "另有" not in m and "CSV" not in m
+
+
+def test_foreign_radar_section_rendered():
+    rf = pd.DataFrame([{"stock_id": "2330", "industry": "半導體業", "close": 2480.0, "foreign_ratio": 0.08,
+                        "foreign_20d": 5_000_000.0, "since_start_pct": 3.0, "ex20_pct": 1.0,
+                        "dist52_pct": 6.0, "rev_yoy": 53.0, "retail_wchg": float("nan")}])
+    m = tg.format_signals({"radar_f": rf}, "2026-10-06")[0]
+    assert "外資佈局雷達" in m and "佔成交量8.0%" in m and "+5,000張" in m

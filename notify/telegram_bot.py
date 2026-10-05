@@ -271,6 +271,25 @@ def _radar_section(radar: pd.DataFrame, names: dict[str, str], date: str) -> lis
     return lines
 
 
+def _radar_foreign_section(radar: pd.DataFrame, names: dict[str, str]) -> list[str]:
+    """外資版雷達（F1）：外資 20 日買超佔成交量排全市場前 20%＋同樣的營收／位置條件。"""
+    if radar is None or radar.empty:
+        return []
+    lines = [f"🌐 <b>外資佈局雷達</b>（{len(radar)}）",
+             "<i>外資20日買超比例前20%＋營收年增≥15%＋股價還沒反映；與投信版並行前瞻追蹤，不是進場訊號</i>"]
+    for _, r in radar.iterrows():
+        sid = str(r["stock_id"])
+        rw = r.get("retail_wchg", float("nan"))
+        rw_s = f"散戶週{rw:+.2f}pp" if not _isnan(rw) else "散戶—"
+        lines.append(
+            f"\n<b>{sid} {names.get(sid, '')}</b>  {_px(r['close'])}  [{r.get('industry', '')}]\n"
+            f"   外資20日{_zhang(r['foreign_20d'])}（佔成交量{r['foreign_ratio'] * 100:.1f}%）\n"
+            f"   20日漲幅{r['since_start_pct']:+.1f}%｜距52週高{r['dist52_pct']:.0f}%｜"
+            f"營收年增{r['rev_yoy']:+.0f}%｜{rw_s}"
+        )
+    return lines
+
+
 def _watch_section(watch: pd.DataFrame, names: dict[str, str]) -> list[str]:
     """觀察名單：依產業分組（檔數多的族群在前），組內 🆕 優先、再按觸發後漲幅。"""
     if watch is None or watch.empty:
@@ -382,6 +401,9 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
     r_lines = _radar_section(signals.get("radar", pd.DataFrame()), names, date)
     if r_lines:
         blocks.append("\n".join(r_lines))
+    f_lines = _radar_foreign_section(signals.get("radar_f", pd.DataFrame()), names)
+    if f_lines:
+        blocks.append("\n".join(f_lines))
 
     # ── 👀 觀察名單 ────────────────────────────────────────────────────────
     w_lines = _watch_section(signals.get("watch", pd.DataFrame()), names)
@@ -432,6 +454,8 @@ def rules_message() -> str:
         "動能 = 近 20 日漲跌；⚠️未表態 = 價格還沒動，可跳過",
         "🎯 法人佈局雷達 = 投信連買≥3天＋營收年增≥15%＋投信進場後漲＜8%、近20日超額−3～+5%、"
         "距52週高5～20%、站上季線、散戶沒增加。條件凍結、前瞻追蹤中，不是進場訊號",
+        "🌐 外資佈局雷達 = 同上，但把「投信連買≥3天」換成「外資20日買超佔成交量排全市場前20%」、"
+        "「投信進場後漲＜8%」換成「近20日漲＜8%」。兩版並行前瞻追蹤，3 個月後比較",
         "👀 營收爆發觀察 = 不是進場訊號，題材與時機自己判斷",
         "🚨 出場 = 系統發過的訊號觸及上面的停損／停利／移動停利／天數（與回測同一套規則；不是你的持股）",
         "📈 移動停利啟動 = 漲幅已達門檻，之後跌破提示價就出場（只提醒一次）",

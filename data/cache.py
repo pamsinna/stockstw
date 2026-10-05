@@ -776,26 +776,39 @@ def inst_coverage_on(date: str, stock_ids: set[str]) -> float:
     return len(inst & base) / len(base) if base else 0.0
 
 
-def save_radar_log(df: pd.DataFrame) -> None:
-    """法人佈局雷達每日名單（前瞻追蹤用）。同 (date, stock_id) 不重複寫。"""
-    from technical.signals import LAYOUT_RULES_VERSION
-    cols = ["date", "stock_id", "close", "trust_days", "trust_20d", "since_start_pct", "ex20_pct",
-            "dist52_pct", "rev_yoy", "retail_wchg"]
+_RADAR_TABLE = {"trust": "radar_log", "foreign": "radar_log_foreign"}
+
+
+def save_radar_log(df: pd.DataFrame, variant: str = "trust") -> None:
+    """法人佈局雷達每日名單（前瞻追蹤用）。投信版 radar_log、外資版 radar_log_foreign。
+    同 (date, stock_id) 不重複寫。"""
+    from technical.signals import LAYOUT_RULES_VERSION, FOREIGN_LAYOUT_RULES_VERSION
+    table = _RADAR_TABLE[variant]
+    ver = LAYOUT_RULES_VERSION if variant == "trust" else FOREIGN_LAYOUT_RULES_VERSION
+    cols = ["date", "stock_id", "close", "since_start_pct", "ex20_pct", "dist52_pct", "rev_yoy",
+            "retail_wchg", "trust_days", "trust_20d", "foreign_ratio", "foreign_20d"]
     df = df.copy()
     df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
-    df = df[[c for c in cols if c in df.columns]].assign(rules_version=LAYOUT_RULES_VERSION)
+    for c in cols:
+        if c not in df.columns:
+            df[c] = None
+    df = df[cols].assign(rules_version=ver)
     with _conn() as con:
-        con.execute("""CREATE TABLE IF NOT EXISTS radar_log (
+        con.execute(f"""CREATE TABLE IF NOT EXISTS {table} (
             date TEXT NOT NULL, stock_id TEXT NOT NULL, close REAL, trust_days REAL, trust_20d REAL,
             since_start_pct REAL, ex20_pct REAL, dist52_pct REAL, rev_yoy REAL, retail_wchg REAL,
             rules_version TEXT, PRIMARY KEY (date, stock_id))""")
-        df.to_sql("radar_log", con, if_exists="append", index=False, method=_insert_or_ignore)
+        existing = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
+        for c in ("foreign_ratio", "foreign_20d"):
+            if c not in existing:
+                con.execute(f"ALTER TABLE {table} ADD COLUMN {c} REAL")
+        df.to_sql(table, con, if_exists="append", index=False, method=_insert_or_ignore)
 
 
-def load_radar_log() -> pd.DataFrame:
+def load_radar_log(variant: str = "trust") -> pd.DataFrame:
     with _conn() as con:
         try:
-            df = pd.read_sql("SELECT * FROM radar_log ORDER BY date", con)
+            df = pd.read_sql(f"SELECT * FROM {_RADAR_TABLE[variant]} ORDER BY date", con)
         except Exception:
             return pd.DataFrame()
     if not df.empty:
