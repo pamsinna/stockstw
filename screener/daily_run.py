@@ -4,6 +4,7 @@
 2. 對每個通過基本面的股票算技術訊號
 3. 分三個時間框架輸出當日訊號清單，並套用大盤過濾
 """
+import os
 import time
 import logging
 from datetime import datetime, timedelta
@@ -20,6 +21,7 @@ from data.cache import (
     last_full_market_date, revenue_month_counts,
     last_price_date, earliest_last_date_since,
     load_shareholding_latest, load_shareholding, save_radar_log,
+    get_meta, set_meta, inst_coverage_on,
     save_shareholding, last_shareholding_date,
     save_futures_inst, last_futures_inst_date,
 )
@@ -81,6 +83,11 @@ FIN_COVERAGE_OK = 0.9
 DEEP_HISTORY_START = "2024-01-01"
 # 觀察名單（營收爆發）回看窗：近 20 交易日內觸發過都列，今日新觸發標 🆕
 WATCH_WINDOW = 20
+# 多排程（16:37 / 18:07 / 21:07）：法人入庫比例達此才發通知；本地時間過 FINAL_RUN_HOUR
+# 的那次無論如何都發（附註資料未齊）。LAST_NOTIFIED_KEY 記最後發過的交易日，避免重發。
+INST_READY_RATIO = 0.9
+FINAL_RUN_HOUR = 20
+LAST_NOTIFIED_KEY = "last_notified_trade_date"
 # 法人佈局雷達顯示／記錄上限（實測近 40 交易日平均每天 ~1 檔、最多 4 檔）
 RADAR_MAX = 10
 
@@ -604,12 +611,29 @@ def run_daily(notify_fn=None) -> dict | None:
         return None
 
     incremental_update(universe)
+
+    # 一天排多個 cron（GitHub 排程常延遲數小時）：第一個「資料齊全」的 run 發通知，
+    # 之後的 run 只更新資料。假日也不會再把前一交易日的訊號重發一次。
+    trade_date = last_price_date(TAIEX_PROXY) or ""
+    force = os.getenv("FORCE_NOTIFY") == "1"
+    if notify_fn and not force and trade_date and get_meta(LAST_NOTIFIED_KEY) == trade_date:
+        logger.info(f"Already notified for {trade_date} — data updated, skipping screen/notify.")
+        return None
+    inst_ready = inst_coverage_on(trade_date, set(universe["stock_id"])) >= INST_READY_RATIO
+    final_run = datetime.now(_TZ).hour >= FINAL_RUN_HOUR
+    if notify_fn and not force and not inst_ready and not final_run:
+        logger.warning(f"三大法人 {trade_date} 尚未公布齊全 — 不發通知，等下一個排程。")
+        return None
+
     signals = screen_today(universe)
 
     # 報告日 = 資料最後交易日（cron 常延遲、跑過午夜會變成隔天甚至週六）
     meta = signals.get("_meta", pd.DataFrame())
     today = (meta.iloc[0]["trade_date"] if not meta.empty and "trade_date" in meta.columns
              else datetime.now(_TZ).strftime("%Y-%m-%d"))
+    if not inst_ready and not meta.empty:
+        signals["_meta"]["regime_label"] = (str(meta.iloc[0].get("regime_label", ""))
+                                            + "｜⚠️ 當日法人資料未齊，籌碼條件可能少算一天")
 
     # 最終候選名單：通知顯示什麼、出場監控就追蹤什麼（AQS<50 剔除、S5 單日上限、總數上限）
     from screener.candidates import finalize_candidates
@@ -665,5 +689,6 @@ def run_daily(notify_fn=None) -> dict | None:
 
     if notify_fn:
         notify_fn(signals)
+        set_meta(LAST_NOTIFIED_KEY, today)
 
     return signals

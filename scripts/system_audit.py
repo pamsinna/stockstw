@@ -211,8 +211,16 @@ def main() -> int:
         if msg is None:
             print("✅ 全綠燈，不推 Telegram")
             return 0
+        # 一天排多個 cron → 同一天只推一次體檢摘要
+        from data.cache import get_meta, set_meta
+        today = date.today().isoformat()
+        if get_meta("last_audit_telegram") == today:
+            print("今天已推過體檢摘要，略過")
+            return 0
         from notify.telegram_bot import send_message
         ok = send_message(msg)
+        if ok:
+            set_meta("last_audit_telegram", today)
         print(f"Telegram audit summary {'sent' if ok else 'FAILED'}")
         return 0 if ok else 1
     else:

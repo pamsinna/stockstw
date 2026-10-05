@@ -753,6 +753,29 @@ def load_open_signals() -> pd.DataFrame:
     return df
 
 
+def get_meta(key: str) -> str | None:
+    """小型 key-value 狀態（例：最後一次發通知的交易日）。"""
+    with _conn() as con:
+        con.execute("CREATE TABLE IF NOT EXISTS kv_meta (key TEXT PRIMARY KEY, value TEXT)")
+        row = con.execute("SELECT value FROM kv_meta WHERE key=?", (key,)).fetchone()
+    return row[0] if row else None
+
+
+def set_meta(key: str, value: str) -> None:
+    with _conn() as con:
+        con.execute("CREATE TABLE IF NOT EXISTS kv_meta (key TEXT PRIMARY KEY, value TEXT)")
+        con.execute("INSERT OR REPLACE INTO kv_meta VALUES (?, ?)", (key, value))
+
+
+def inst_coverage_on(date: str, stock_ids: set[str]) -> float:
+    """date 當天有價格的追蹤股中，三大法人資料也已入庫的比例（判斷法人是否已公布）。"""
+    with _conn() as con:
+        px = {r[0] for r in con.execute("SELECT stock_id FROM daily_price WHERE date=?", (date,))}
+        inst = {r[0] for r in con.execute("SELECT stock_id FROM institutional WHERE date=?", (date,))}
+    base = px & stock_ids
+    return len(inst & base) / len(base) if base else 0.0
+
+
 def save_radar_log(df: pd.DataFrame) -> None:
     """法人佈局雷達每日名單（前瞻追蹤用）。同 (date, stock_id) 不重複寫。"""
     from technical.signals import LAYOUT_RULES_VERSION

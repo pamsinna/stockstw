@@ -192,3 +192,56 @@ def test_rules_message_is_valid_telegram_html():
     txt = tg.rules_message()
     # 只允許 <b> <i> 標籤；其他「<」會讓 Telegram 整則 400
     assert not re.search(r"<(?!/?[bi]>)", txt)
+
+
+# ─── 多排程：同交易日只發一次、法人未齊先不發（最後一班照發）──────────────────
+
+@pytest.fixture
+def daily(monkeypatch, tmp_path):
+    import screener.daily_run as dr
+    import notify.exit_monitor as em
+    import data.fetcher as fe
+    import data.cache as ca
+    meta = {}
+    state = {"cov": 1.0, "hour": 17}
+    monkeypatch.setattr(dr, "init_db", lambda: None)
+    monkeypatch.setattr(dr, "build_universe", lambda: pd.DataFrame({"stock_id": ["2330"], "market": ["TWSE"]}))
+    monkeypatch.setattr(dr, "incremental_update", lambda u: None)
+    monkeypatch.setattr(dr, "last_price_date", lambda sid: "2026-10-05")
+    monkeypatch.setattr(dr, "get_meta", lambda k: meta.get(k))
+    monkeypatch.setattr(dr, "set_meta", lambda k, v: meta.__setitem__(k, v))
+    monkeypatch.setattr(dr, "inst_coverage_on", lambda d, ids: state["cov"])
+    monkeypatch.setattr(dr, "screen_today", lambda u: {"_meta": pd.DataFrame([{
+        "regime_label": "🟡 中性", "regime_60d_return": 0.0, "trade_date": "2026-10-05"}])})
+    monkeypatch.setattr(dr, "datetime", type("D", (), {
+        "now": staticmethod(lambda tz=None: type("N", (), {"hour": state["hour"],
+                                                           "strftime": lambda self, f: "2026-10-05"})()),
+        "fromisoformat": staticmethod(__import__("datetime").datetime.fromisoformat)}))
+    monkeypatch.setattr(em, "_load", lambda: pd.DataFrame([{"x": 1}]))
+    monkeypatch.setattr(em, "prune_untracked", lambda: 0)
+    monkeypatch.setattr(em, "record_today", lambda s, d: None)
+    monkeypatch.setattr(em, "evaluate", lambda d: pd.DataFrame())
+    monkeypatch.setattr(fe, "us_credit_stress_summary", lambda: "")
+    monkeypatch.setattr(ca, "telecom_flow_summary", lambda: "")
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "reports").mkdir()
+    monkeypatch.delenv("FORCE_NOTIFY", raising=False)
+    return dr, meta, state
+
+
+def test_notifies_once_per_trade_date(daily):
+    dr, meta, state = daily
+    sent = []
+    dr.run_daily(notify_fn=sent.append)
+    dr.run_daily(notify_fn=sent.append)          # 第二班排程
+    assert len(sent) == 1 and meta[dr.LAST_NOTIFIED_KEY] == "2026-10-05"
+
+
+def test_waits_when_institutional_not_ready_then_final_run_sends(daily):
+    dr, meta, state = daily
+    sent = []
+    state.update(cov=0.3, hour=16)
+    assert dr.run_daily(notify_fn=sent.append) is None and not sent      # 16:37 法人未齊 → 不發
+    state.update(hour=21)
+    dr.run_daily(notify_fn=sent.append)                                   # 21:07 最後一班 → 照發
+    assert len(sent) == 1 and "法人資料未齊" in sent[0]["_meta"].iloc[0]["regime_label"]
