@@ -245,3 +245,12 @@ def test_waits_when_institutional_not_ready_then_final_run_sends(daily):
     state.update(hour=21)
     dr.run_daily(notify_fn=sent.append)                                   # 21:07 最後一班 → 照發
     assert len(sent) == 1 and "法人資料未齊" in sent[0]["_meta"].iloc[0]["regime_label"]
+
+
+def test_watch_list_shows_everything_no_file_reference():
+    rows = [{"stock_id": f"{1000 + i}", "industry": "電子零組件業" if i % 2 else "半導體業", "close": 50.0,
+             "since_pct": 1.0, "is_new": False, "burst_yoy": 60.0, "burst_g3": 35.0, "f_60d": 0.0}
+            for i in range(40)]
+    m = "\n".join(tg.format_signals({"watch": pd.DataFrame(rows)}, "2026-10-05"))
+    assert all(f"{1000 + i}" in m for i in range(40))
+    assert "另有" not in m and "CSV" not in m

@@ -167,8 +167,6 @@ def _aqs_plain(score: float, stage: str) -> str:
 # 規則類說明移到置頂訊息（rules_message / send_rules），每日只用 [S4] 標籤。
 
 TG_MAX_LEN = 4000           # Telegram 上限 4096，留緩衝
-MAX_CANDIDATES = 15         # 進場候選合併後上限（依動能取前 N）
-MAX_WATCH = 15              # 觀察名單上限
 _TAG_ORDER = [("long", "S4"), ("revenue", "S5"), ("growth", "S6"), ("accum", "S7")]
 _WEEKDAY = "一二三四五六日"
 
@@ -284,7 +282,7 @@ def _watch_section(watch: pd.DataFrame, names: dict[str, str]) -> list[str]:
     counts = w["industry"].value_counts()
     w["_ind_n"] = w["industry"].map(counts)
     w = w.sort_values(["_ind_n", "industry", "is_new", "since_pct"],
-                      ascending=[False, True, False, False]).head(MAX_WATCH)
+                      ascending=[False, True, False, False])
     lines = [f"👀 <b>營收爆發觀察</b>（近20日 {n_total} 檔，🆕 今日 {n_new}）",
              "<i>不是進場訊號；看哪個族群集中、觸發後有沒有續漲，題材自己判斷</i>"]
     for ind, g in w.groupby("industry", sort=False):
@@ -296,8 +294,6 @@ def _watch_section(watch: pd.DataFrame, names: dict[str, str]) -> list[str]:
                 f" {new}{r['stock_id']} {names.get(r['stock_id'], '')}  {_px(r['close'])}{since}"
                 f"  營收年增{r['burst_yoy']:+.0f}% 近3月{r['burst_g3']:+.0f}%  外資60日{_zhang(r['f_60d'])}"
             )
-    if n_total > len(w):
-        lines.append(f"\n<i>…另有 {n_total - len(w)} 檔，見 reports/signals_watch CSV</i>")
     return lines
 
 
@@ -374,10 +370,9 @@ def format_signals(signals: dict[str, pd.DataFrame], date: str) -> list[str]:
     if not cands.empty:
         cands = _rank_mom(cands, date)
         lines = [f"🛒 <b>新進場候選</b>（{len(cands)}）依動能排序"]
-        for i, (_, r) in enumerate(cands.head(MAX_CANDIDATES).iterrows(), 1):
+        # 數量上限在 screener.candidates（顯示什麼＝追蹤什麼），這裡全部列出
+        for i, (_, r) in enumerate(cands.iterrows(), 1):
             lines.append(_candidate_line(i, r, names))
-        if len(cands) > MAX_CANDIDATES:
-            lines.append(f"<i>…另有 {len(cands) - MAX_CANDIDATES} 檔動能較弱，略</i>")
         blocks.append("\n".join(lines))
         long_df = signals.get("long", pd.DataFrame())
         if long_df is not None and not long_df.empty:
