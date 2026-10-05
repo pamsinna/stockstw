@@ -51,9 +51,8 @@ bash setup_env.sh           # creates .venv, installs requirements, copies .env.
 # Activate environment (required each session)
 source .venv/bin/activate
 
-# Data bootstrap (one-time, ~1-2 hours due to API rate limits)
-python main.py download          # prices + institutional data for all stocks
-python main.py download-revenue  # monthly revenue (separate due to rate limiting)
+# Data bootstrap (one-time, ~2-3 hours, official sources only)
+python main.py bootstrap 2019-01-01
 
 # Daily workflow
 python main.py screen            # incremental update + screen + Telegram notify
@@ -63,7 +62,6 @@ python main.py backtest          # run all strategies on cached data
 python main.py optimize [N]      # grid-search strategy N (0-indexed)
 
 # Advanced backtest control
-python -m backtest.run_backtest --mode full      # download + all strategies
 python -m backtest.run_backtest --mode strategy  # strategies only (data already in DB)
 python -m backtest.run_backtest --mode optimize --strategy 0
 ```
@@ -71,7 +69,6 @@ python -m backtest.run_backtest --mode optimize --strategy 0
 ## Environment
 
 Secrets go in `.env` (loaded via `python-dotenv` at startup):
-- `FINMIND_TOKEN` — FinMind API token (required for all data fetching)
 - `TELEGRAM_TOKEN` + `TELEGRAM_CHAT_ID` — Telegram bot notifications
 
 All strategy thresholds, fee rates, and backtest date ranges are in `config.py`. The SQLite database lives at `data/cache.db`.
@@ -83,10 +80,10 @@ This is a Taiwan stock auto-screening system with five strategies and a full bac
 ### Data flow
 
 ```
-FinMind API / TWSE / TPEX
-    ↓ data/fetcher.py          — raw HTTP fetch + rate_limit_sleep (6s between calls)
+TWSE / TPEX / MOPS / TAIFEX / TDCC (official, no token — FinMind removed 2026-10)
+    ↓ data/fetcher.py          — raw HTTP fetch of whole-market bulk endpoints
     ↓ data/cache.py            — SQLite persistence (prices, institutional, financial, revenue)
-    ↓ data/universe.py         — build stock universe (TWSE + TPEX + emerging)
+    ↓ data/universe.py         — build stock universe (TWSE + TPEX)
 ```
 
 ### Six modules

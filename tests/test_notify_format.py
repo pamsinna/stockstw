@@ -163,10 +163,12 @@ def test_radar_section_rendered_between_candidates_and_watch():
 
 
 def test_radar_scorecard_dedups_repeat_listings():
-    import importlib.util, pathlib
+    import importlib.util
+    import pathlib
     spec = importlib.util.spec_from_file_location(
         "rs", pathlib.Path(__file__).resolve().parents[1] / "scripts" / "radar_scorecard.py")
-    rs = importlib.util.module_from_spec(spec); spec.loader.exec_module(rs)
+    rs = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rs)
     days = pd.bdate_range("2026-10-06", periods=40)
     log = pd.DataFrame({"date": [days[0], days[1], days[5], days[25]], "stock_id": ["A", "A", "B", "A"]})
     ep = rs.episodes(log, days)

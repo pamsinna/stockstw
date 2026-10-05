@@ -37,16 +37,9 @@ jobs:
             stock-db-${{ runner.os }}-bootstrap-
             stock-db-${{ runner.os }}-
 
-      - name: Download price + institutional
-        env:
-          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
-        run: python main.py download
-
-      # 月營收在 price/institutional 完成後再跑（獨立可恢復）
-      - name: Download monthly revenue
-        env:
-          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
-        run: python main.py download-revenue
+      # 全部官方來源（TWSE/TPEx/MOPS/TAIFEX），免 token；中斷後重跑會從進度接續
+      - name: Bootstrap from official sources
+        run: python main.py bootstrap 2019-01-01
 
       # 確保 Python 完全停止再打包（避免 SQLite 寫到一半被 tar 讀到）
       - name: Wait for Python to stop

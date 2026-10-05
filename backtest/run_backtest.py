@@ -1,26 +1,19 @@
 """
 主回測執行腳本：
-  python -m backtest.run_backtest --mode full      # 全量下載 + 跑所有策略
+  （資料由每日 screen 或 `python main.py bootstrap` 從官方來源更新）
   python -m backtest.run_backtest --mode strategy  # 只重跑策略（資料已在 DB）
   python -m backtest.run_backtest --mode optimize  # grid search 參數優化
 """
 import argparse
 import logging
-from datetime import datetime, timedelta
 import pandas as pd
 from tqdm import tqdm
 
 from data.cache import (
     init_db, load_prices, load_institutional,
-    save_prices, save_institutional, save_monthly_revenue, last_price_date,
-    last_revenue_date, mark_fetch_skip,
-    save_per, last_per_date, save_financial,
 )
 from backtest.pit_signals import strategy_signals
 from data.universe import build_universe
-from data.fetcher import (fetch_price, fetch_institutional, fetch_monthly_revenue,
-                          fetch_per, fetch_financial_statement, fetch_balance_sheet,
-                          fetch_cash_flow)
 from technical.signals import STRATEGIES
 from backtest.engine import run_portfolio_backtest
 from backtest.metrics import calc_metrics, print_report
@@ -34,51 +27,9 @@ from config import (
 TAIEX_PROXY = "0050"  # ETF tracking TAIEX; used as 大盤過濾
 
 
-def _normalize_and_save_revenue(stock_id: str, raw: pd.DataFrame) -> None:
-    """FinMind 月營收欄位正規化後存入 DB。計算 revenue_yoy（若未提供）。"""
-    df = raw.copy()
-    # FinMind 可能回傳 revenue/revenue_month/monthly_revenue 等不同名稱
-    rename = {
-        "Revenue": "revenue",
-        "revenue_month": "revenue",
-        "monthly_revenue": "revenue",
-    }
-    for src, dst in rename.items():
-        if src in df.columns and dst not in df.columns:
-            df.rename(columns={src: dst}, inplace=True)
-
-    if "revenue" not in df.columns:
-        logger.warning(
-            f"{stock_id}: revenue column missing from FinMind response "
-            f"(got columns: {list(df.columns)}); skipping save"
-        )
-        return
-
-    df = df.sort_values("date").reset_index(drop=True)
-    df["revenue"] = pd.to_numeric(df["revenue"], errors="coerce")
-
-    if "revenue_yoy" not in df.columns or df["revenue_yoy"].isna().all():
-        df["revenue_yoy"] = df["revenue"].pct_change(12) * 100
-
-    save_monthly_revenue(stock_id, df)
-
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
-
-# ─── 資料下載 ─────────────────────────────────────────────────────────────────
-
-def _ensure_taiex_proxy(start: str = DATA_START) -> None:
-    """確保 0050 資料在 DB（大盤過濾用）"""
-    last = last_price_date(TAIEX_PROXY)
-    fetch_start = last or start
-    price = fetch_price(TAIEX_PROXY, fetch_start)
-    if price is None:
-        logger.warning("0050 fetch returned 402/403 — using cached data if available")
-    elif not price.empty:
-        save_prices(TAIEX_PROXY, price)
-        logger.info(f"0050 (TAIEX proxy) updated: {len(price)} rows")
-
 
 def build_market_filter(start: str, end: str, ma_period: int = 60,
                         strict: bool = False) -> pd.Series:
@@ -117,138 +68,6 @@ def build_market_filter(start: str, end: str, ma_period: int = 60,
 
     return df.set_index("date")["market_up"]
 
-
-def download_all(universe: pd.DataFrame,
-                 start: str = "2020-01-01",
-                 max_stocks: int | None = None) -> None:
-    # 先確保大盤代理資料存在
-    _ensure_taiex_proxy(start)
-
-    stocks = sorted(universe["stock_id"].tolist())  # 固定排序，確保斷點續跑順序一致
-    if max_stocks:
-        stocks = stocks[:max_stocks]
-
-    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-    logger.info(f"Downloading price + institutional for {len(stocks)} stocks...")
-    skipped = 0
-    for sid in tqdm(stocks, desc="Download"):
-        last = last_price_date(sid)
-        if last and last >= yesterday:
-            skipped += 1
-            continue
-        fetch_start = last or start
-
-        price = fetch_price(sid, fetch_start)  # rate-limited inside _finmind()
-        if price is None:
-            mark_fetch_skip(sid, "price")    # 402/403: 永久跳過，不再重試
-        elif not price.empty:
-            save_prices(sid, price)
-
-        inst = fetch_institutional(sid, fetch_start)  # rate-limited inside _finmind()
-        if inst is None:
-            mark_fetch_skip(sid, "institutional")
-        elif not inst.empty:
-            save_institutional(sid, inst)
-
-    if skipped:
-        logger.info(f"Skipped {skipped} already up-to-date stocks")
-
-
-def download_revenue(universe: pd.DataFrame,
-                     start: str = DATA_START,
-                     max_stocks: int | None = None) -> None:
-    """月營收獨立下載（bootstrap phase 2，主下載完成後再跑）"""
-    stocks = sorted(universe["stock_id"].tolist())  # 固定排序，確保斷點續跑順序一致
-    if max_stocks:
-        stocks = stocks[:max_stocks]
-
-    stale_before = (datetime.now() - timedelta(days=35)).strftime("%Y-%m-%d")
-    logger.info(f"Downloading monthly revenue for {len(stocks)} stocks...")
-    skipped = 0
-    for sid in tqdm(stocks, desc="Revenue"):
-        last = last_revenue_date(sid)
-        if last and last >= stale_before:
-            skipped += 1
-            continue
-        fetch_start = last or start
-        rev = fetch_monthly_revenue(sid, fetch_start)  # rate-limited inside _finmind()
-        if rev is not None and not rev.empty:
-            _normalize_and_save_revenue(sid, rev)
-
-    if skipped:
-        logger.info(f"Skipped {skipped} stocks with recent revenue data")
-
-
-def download_financial(universe: pd.DataFrame,
-                       start: str = DATA_START,
-                       max_stocks: int | None = None) -> None:
-    """財報三表下載（損益表、資產負債表、現金流量表）。季更新，可重跑。"""
-    stocks = sorted(universe["stock_id"].tolist())
-    if max_stocks:
-        stocks = stocks[:max_stocks]
-
-    from data.cache import _conn as _cache_conn
-    with _cache_conn() as _c:
-        already_logged = set(
-            (r[0], r[1]) for r in
-            _c.execute("SELECT stock_id, dataset FROM fetch_log WHERE dataset LIKE 'fin_%'").fetchall()
-        )
-
-    logger.info(f"Downloading financial statements for {len(stocks)} stocks (3 datasets each)...")
-    for sid in tqdm(stocks, desc="Financial"):
-        for fetch_fn, label in [
-            (fetch_financial_statement, "stmt"),
-            (fetch_balance_sheet,       "bs"),
-            (fetch_cash_flow,           "cf"),
-        ]:
-            dataset_key = f"fin_{label}"
-            if (sid, dataset_key) in already_logged:
-                continue
-            df = fetch_fn(sid, start)
-            if df is None:
-                mark_fetch_skip(sid, dataset_key)
-            elif not df.empty:
-                df = df.copy()
-                df["stock_id"] = sid
-                if "date" in df.columns:
-                    df["date"] = df["date"].astype(str)
-                save_financial(sid, df)
-                mark_fetch_skip(sid, dataset_key)  # 記錄已下載，下次 skip
-            else:
-                # 空回應：不寫 fetch_log，下次重試
-                pass
-
-    logger.info("Financial download complete")
-
-
-def download_per(universe: pd.DataFrame,
-                 start: str = DATA_START,
-                 max_stocks: int | None = None) -> None:
-    """每日本益比、股價淨值比、殖利率獨立下載"""
-    stocks = sorted(universe["stock_id"].tolist())
-    if max_stocks:
-        stocks = stocks[:max_stocks]
-
-    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-    logger.info(f"Downloading daily PER/PBR for {len(stocks)} stocks...")
-    skipped = 0
-    for sid in tqdm(stocks, desc="PER"):
-        last = last_per_date(sid)
-        if last and last >= yesterday:
-            skipped += 1
-            continue
-        fetch_start = last or start
-        per = fetch_per(sid, fetch_start)
-        if per is None:
-            mark_fetch_skip(sid, "per")
-        elif not per.empty:
-            save_per(sid, per)
-
-    if skipped:
-        logger.info(f"Skipped {skipped} already up-to-date stocks")
-
-
-# ─── 策略回測 ─────────────────────────────────────────────────────────────────
 
 def run_all_strategies(universe: pd.DataFrame,
                        train: bool = True,
@@ -374,7 +193,7 @@ def optimize(universe: pd.DataFrame, strategy_idx: int = 0,
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=["full", "strategy", "optimize"],
+    parser.add_argument("--mode", choices=["strategy", "optimize"],
                         default="strategy")
     parser.add_argument("--max-stocks", type=int, default=None,
                         help="限制股票數（測試用）")
@@ -392,12 +211,7 @@ def main() -> None:
     logger.info(f"Universe: {len(universe)} stocks "
                 f"({universe['market'].value_counts().to_dict()})")
 
-    if args.mode == "full":
-        download_all(universe, max_stocks=args.max_stocks)
-        run_all_strategies(universe, train=True, max_stocks=args.max_stocks)
-        run_all_strategies(universe, train=False, max_stocks=args.max_stocks)
-
-    elif args.mode == "strategy":
+    if args.mode == "strategy":
         run_all_strategies(universe, train=True, max_stocks=args.max_stocks)
         run_all_strategies(universe, train=False, max_stocks=args.max_stocks)
 

@@ -35,7 +35,7 @@ def _fin(ocf_pairs, ni_quarters):
 NI4 = [("2025-09-30", 10), ("2025-12-31", 10), ("2026-03-31", 10), ("2026-06-30", 10)]
 
 
-def test_ocf_ratio_uses_finmind_names_and_ttm():
+def test_ocf_ratio_uses_db_type_names_and_ttm():
     fin = _fin([("2025-06-30", 20), ("2025-12-31", 40), ("2026-06-30", 28)], NI4)
     # TTM OCF = 28 + 40 − 20 = 48；TTM NI = 40
     assert abs(_calc_ocf_ratio(fin)["ocf_ratio"] - 1.2) < 1e-9

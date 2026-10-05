@@ -298,14 +298,19 @@ def test_save_monthly_revenue_bulk_backfill_keeps_fetched_null(temp_db):
     assert cache.revenue_month_counts("2026-01-01") == {"2026-06-01": 1}
 
 
-def test_stale_financial_stocks_order_and_retry(temp_db):
-    cache.save_financial("A", pd.DataFrame([{"date": "2025-12-31", "type": "EPS", "value": 1.0}]))
-    cache.save_financial("B", pd.DataFrame([{"date": "2025-09-30", "type": "EPS", "value": 1.0}]))
-    cache.save_financial("C", pd.DataFrame([{"date": "2026-06-30", "type": "EPS", "value": 1.0}]))
-    todo = cache.stale_financial_stocks(["A", "B", "C", "D"], "2026-06-30", "2026-09-27")
-    assert todo == ["B", "A", "D"]  # 最落後先補；已是最新季的 C 不補；沒財報的 D 排最後
-    cache.mark_financial_attempt("B", "2026-09-30")
-    assert cache.stale_financial_stocks(["A", "B"], "2026-06-30", "2026-09-27") == ["A"]
+def test_save_financial_bulk_and_coverage(temp_db):
+    q = "2026-06-30"
+    cache.save_financial_bulk(pd.DataFrame([
+        {"stock_id": "A", "date": "2026-03-31", "type": "EPS", "value": 1.0},
+        {"stock_id": "B", "date": "2026-03-31", "type": "EPS", "value": 1.0},
+        {"stock_id": "A", "date": q, "type": "EPS", "value": 2.0},
+    ]))
+    # 不覆蓋既有（INSERT OR IGNORE）
+    cache.save_financial_bulk(pd.DataFrame([{"stock_id": "A", "date": q, "type": "EPS", "value": 9.0}]))
+    fa = cache.load_financial("A")
+    assert fa[fa["date"] == pd.Timestamp(q)]["value"].iloc[0] == 2.0
+    # 分母只算曾有財報的追蹤股（C 沒財報、像 ETF，不算）
+    assert cache.financial_coverage(q, {"A", "B", "C"}) == 0.5
 
 
 @pytest.mark.parametrize("day,expected", [
@@ -367,3 +372,61 @@ def test_load_prices_adjusts_and_respects_start(temp_db):
     assert adj["close"].iloc[0] == 25.0 and raw["close"].iloc[0] == 100.0
     assert cache.price_adjust_factor("0050", df["date"].iloc[2].strftime("%Y-%m-%d")) == 0.25
     assert cache.price_adjust_factor("0050", df["date"].iloc[7].strftime("%Y-%m-%d")) == 1.0
+
+
+# ─── 2026-10 移除 FinMind：MOPS 財報 / 期交所 / 季別排程 ─────────────────────────
+
+_FIN_HTML = """<table><tr><th>公司 代號</th><th>公司名稱</th><th>營業收入</th><th>營業毛利（毛損）</th>
+<th>營業利益（損失）</th><th>本期淨利（淨損）</th><th>基本每股盈餘（元）</th></tr>
+<tr><td>2330</td><td>台積電</td><td>2,404,483,690</td><td>1,611,606,116</td><td>1,500,000,000</td>
+<td>1,279,582,227</td><td>49.34</td></tr>
+<tr><td>合計</td><td></td><td>1</td><td>1</td><td>1</td><td>1</td><td>1</td></tr></table>"""
+
+
+def test_parse_mops_fin_html_maps_columns():
+    df = fetcher._parse_mops_fin_html(_FIN_HTML, "t163sb04").set_index("stock_id")
+    assert list(df.index) == ["2330"]
+    assert df.loc["2330", "Revenue"] == 2404483690 and df.loc["2330", "EPS"] == 49.34
+
+
+def test_mops_financials_decumulates_income_and_scales(monkeypatch):
+    def fake(ep, year, q):
+        if ep == "t163sb04":
+            v = {1: (100.0, 2.0), 2: (250.0, 5.0)}[q]
+            return pd.DataFrame([{"stock_id": "2330", "Revenue": v[0], "EPS": v[1]}])
+        if ep == "t163sb05":
+            return pd.DataFrame([{"stock_id": "2330", "Equity": 1000.0}])
+        return pd.DataFrame([{"stock_id": "2330", "CashFlowsFromOperatingActivities": 80.0}])
+    monkeypatch.setattr(fetcher, "fetch_mops_statement", fake)
+    df = fetcher.fetch_mops_financials(2026, 2).set_index("type")["value"]
+    assert df["Revenue"] == 150_000.0          # (250-100) 仟元 → 元
+    assert df["EPS"] == 3.0                     # EPS 也去累計、不乘 1000
+    assert df["Equity"] == 1_000_000.0          # 時點值
+    assert df["CashFlowsFromOperatingActivities"] == 80_000.0   # 現金流維持年初累計
+
+
+def test_taifex_futures_inst_parses_csv(monkeypatch):
+    csv = ("日期,商品名稱,身份別,多方交易口數,多方交易契約金額(千元),空方交易口數,空方交易契約金額(千元),"
+           "多空交易口數淨額,多空交易契約金額淨額(千元),多方未平倉口數,多方未平倉契約金額(千元),"
+           "空方未平倉口數,空方未平倉契約金額(千元),多空未平倉口數淨額,多空未平倉契約金額淨額(千元)\n"
+           "2026/09/29,臺股期貨,外資及陸資,1,1,1,1,0,0,8788,1,87817,1,-79029,1\n")
+
+    class R:
+        text = csv
+        encoding = "big5"
+    monkeypatch.setattr(fetcher._session, "post", lambda *a, **k: R())
+    df = fetcher.fetch_taifex_futures_inst("TX", "2026-09-29", "2026-09-29")
+    r = df.iloc[0]
+    assert r["institution"] == "外資" and r["net_oi"] == -79029 and r["long_oi"] == 8788
+
+
+@pytest.mark.parametrize("day,expected", [
+    ("2026-10-05", [(2026, 3), (2026, 2)]),     # Q3 申報中（每天抓）＋ 已過期限的 Q2
+    ("2026-11-20", [(2026, 3)]),               # Q3 期限+5 內
+    ("2026-12-01", [(2026, 3)]),               # 只剩已過期的 Q3
+    ("2026-02-10", [(2025, 4), (2025, 3)]),    # 年報申報中
+])
+def test_quarters_to_refresh(day, expected):
+    from datetime import date
+    from screener.daily_run import _quarters_to_refresh
+    assert _quarters_to_refresh(date.fromisoformat(day)) == expected

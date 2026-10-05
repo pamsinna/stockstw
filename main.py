@@ -3,7 +3,7 @@
   python main.py screen     # 每日選股（GitHub Actions 用）
   python main.py rules      # 發送策略規則對照並置頂 Telegram
   python main.py backtest   # 跑回測 + 輸出報告
-  python main.py download   # 只下載資料不選股
+  python main.py bootstrap [2019-01-01]  # 從零重建資料庫（全部官方來源）
 """
 import sys
 import subprocess
@@ -34,57 +34,19 @@ def main() -> None:
             "--mode", "strategy",
         ])
 
-    elif mode == "download":
+    elif mode == "bootstrap":
+        # 從零重建資料庫（全部官方來源）：python main.py bootstrap [2019-01-01]
         import logging
         from data.cache import init_db
         from data.universe import build_universe
-        from backtest.run_backtest import download_all
+        from screener.daily_run import bootstrap_official
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
         init_db()
         universe = build_universe(force_refresh=True)
-        if universe.empty or "stock_id" not in universe.columns:
-            logging.error("Universe is empty — check FINMIND_TOKEN secret")
+        if universe.empty:
+            logging.error("Universe is empty — TWSE/TPEx ISIN 頁面無法取得")
             sys.exit(1)
-        logging.info(f"Universe: {len(universe)} stocks")
-        download_all(universe)
-
-    elif mode == "download-revenue":
-        import logging
-        from data.cache import init_db
-        from data.universe import build_universe
-        from backtest.run_backtest import download_revenue
-        init_db()
-        universe = build_universe()
-        if universe.empty or "stock_id" not in universe.columns:
-            logging.error("Universe is empty — check FINMIND_TOKEN secret")
-            sys.exit(1)
-        logging.info(f"Universe: {len(universe)} stocks")
-        download_revenue(universe)
-
-    elif mode == "download-financial":
-        import logging
-        from data.cache import init_db
-        from data.universe import build_universe
-        from backtest.run_backtest import download_financial
-        init_db()
-        universe = build_universe()
-        if universe.empty or "stock_id" not in universe.columns:
-            logging.error("Universe is empty — check FINMIND_TOKEN secret")
-            sys.exit(1)
-        logging.info(f"Universe: {len(universe)} stocks")
-        download_financial(universe)
-
-    elif mode == "download-per":
-        import logging
-        from data.cache import init_db
-        from data.universe import build_universe
-        from backtest.run_backtest import download_per
-        init_db()
-        universe = build_universe()
-        if universe.empty or "stock_id" not in universe.columns:
-            logging.error("Universe is empty — check FINMIND_TOKEN secret")
-            sys.exit(1)
-        logging.info(f"Universe: {len(universe)} stocks")
-        download_per(universe)
+        bootstrap_official(universe, sys.argv[2] if len(sys.argv) > 2 else "2019-01-01")
 
     elif mode == "optimize":
         subprocess.run([
@@ -94,7 +56,7 @@ def main() -> None:
         ])
 
     else:
-        print("Usage: python main.py [screen|rules|backtest|download|download-revenue|download-per|download-financial|optimize]")
+        print("Usage: python main.py [screen|rules|backtest|bootstrap|optimize]")
         sys.exit(1)
 
 

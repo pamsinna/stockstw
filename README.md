@@ -9,7 +9,7 @@
 ## 系統架構
 
 ```
-資料來源（TWSE/TPEx 官方 bulk 為主 + FinMind 補財報/興櫃 + TDCC 大戶）
+資料來源（全部官方免費：TWSE/TPEx/MOPS/TAIFEX/TDCC，2026-10 起不再使用 FinMind）
         ↓
 資料層（SQLite 本地快取，斷點續跑）
         ↓
@@ -236,7 +236,7 @@ S7 每年 70+ 筆訊號比較多，**並非每筆都會大贏**。透過失敗�
 - **No look-ahead bias**：訊號在 T 日收盤後計算，T+1 開盤 + 滑價 0.1% 才進場
 - **嚴格大盤過濾**（S4 用）：0050 收 > MA60 + 收 > MA20 + MA60 升 + MA20 升，四條全到位才算多頭
 - **移動停利取代固定停利**：避免砍掉飆股的尾巴（S4 漲 20% 觸發、S6/S7 漲 80% 觸發）
-- **官方 bulk 資料管線**：每日價量／三大法人／月營收改走 TWSE/TPEx 官方 API（單一請求回傳全市場、免 token、無限流），本益比走 TWSE BWIBBU_d + TPEx peQryDate bulk、月營收走 MOPS t21sc03 即時頁（每日抓，首次抓到日 = 實際公布日；含 KY 外國公司頁）。FinMind 只留作財報（每日滾動刷新 150 檔）/興櫃/歷史回補。經逐筆比對與 FinMind 完全一致。每日跑批從 ~4-5 小時降到數分鐘
+- **官方 bulk 資料管線**：每日價量／三大法人／月營收改走 TWSE/TPEx 官方 API（單一請求回傳全市場、免 token、無限流），本益比走 TWSE BWIBBU_d + TPEx peQryDate bulk、月營收走 MOPS t21sc03 即時頁（每日抓，首次抓到日 = 實際公布日；含 KY 外國公司頁）。財報走 MOPS 彙總報表（損益 t163sb04／資產負債 t163sb05／現金流量 t163sb20，每季上市＋上櫃各一個請求涵蓋全市場；與舊 FinMind 資料逐筆比對 99.8% 一致，不一致的是 FinMind 自己倒算 Q4 的錯）。2026-10 起完全不使用 FinMind；資料庫可用 `python main.py bootstrap` 從官方來源重建。經逐筆比對與 FinMind 完全一致。每日跑批從 ~4-5 小時降到數分鐘
 - **資料新鮮度保護（兩道）**：① 個股資料未更新至最新交易日就跳過；② 絕對日曆 gate — 大盤代理 0050 落後現實超過 7 天就**中止選股、發「資料過期」警報**，避免拿舊價當「今日」
 - **白話通知**：每筆訊號只顯示 名稱·價·法人籌碼（張）+ 一句白話判讀（「真累積，可進但別追高」/「不夠強，別主動追」/「可能在騙散戶，千萬不要追」），砍掉 BB/KD/RSI/本益比 等「本來就是進場門檻、家家一樣」的技術雜訊
 - **通知照「動作」分三層、每天一則**：🚨 要處理（系統發過的訊號觸及停損／停利／移動停利，與回測同規則）→ 🛒 新進場候選（S4～S7 合併、每檔一列、標籤 `[S4+S7⭐]`、依 20 日動能排序）→ 👀 營收爆發觀察（近 20 日觸發、依產業分組、🆕=今日新增、附觸發後漲跌，**不是進場訊號**，題材自己判斷）；HY OAS / 電信三雄放最後「📎 參考」。停利停損等規則改成置頂訊息（`python main.py rules`），每日不再重印
@@ -253,7 +253,7 @@ S7 每年 70+ 筆訊號比較多，**並非每筆都會大贏**。透過失敗�
 | 語言 | Python 3.11 |
 | 資料處理 | pandas, numpy |
 | 資料庫 | SQLite |
-| 資料來源 | TWSE/TPEx 官方 bulk（價量/法人/月營收）+ FinMind（財報/PER/興櫃）+ TDCC 集保 + FRED（美國信用利差 HY OAS） |
+| 資料來源 | TWSE/TPEx 官方 bulk（價量/法人/本益比/除權息/個股歷史）+ MOPS（月營收/財報彙總表）+ TAIFEX（期貨法人）+ TDCC 集保 + FRED（美國信用利差 HY OAS），全部免 token |
 | 排程 | GitHub Actions（每天 17:00 台灣時間） |
 | 推播 | Telegram Bot + Discord Webhook |
 | 測試 | pytest（73 個單元測試） |
@@ -271,7 +271,6 @@ source .venv/bin/activate
 建立 `.env` 檔案（參考 `.env.example`）：
 
 ```bash
-FINMIND_TOKEN=<你的 token>    # 必填，免費申請 finmindtrade.com
 TELEGRAM_TOKEN=<bot token>     # 選填
 TELEGRAM_CHAT_ID=<chat id>     # 選填
 DISCORD_WEBHOOK_URL=<webhook>  # 選填
@@ -282,9 +281,8 @@ DISCORD_WEBHOOK_URL=<webhook>  # 選填
 ## 📖 使用方式
 
 ```bash
-# 一次性資料下載（首次跑，需 1-2 小時）
-python main.py download           # 價格 + 法人籌碼
-python main.py download-revenue   # 月營收（分開跑避免 rate limit）
+# 一次性從零建資料庫（全部官方來源、免 token，約 2-3 小時，可中斷續跑）
+python main.py bootstrap 2019-01-01
 
 # 每日選股（GitHub Actions 自動跑、也可手動）
 python main.py screen

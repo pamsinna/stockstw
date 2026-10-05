@@ -3,14 +3,14 @@ name: Daily Stock Screen
 on:
   schedule:
     # 台灣時間約 17:00（UTC 09:00），盤後 3.5 小時開始跑、約 18:30 結束
-    # 三大法人約 17:00 後公布，FinMind 同步約再延 30min；運行末段抓的
+    # 三大法人約 17:00 後公布（證交所／櫃買官方）；運行末段抓的
     # 股票應已有當日法人資料，f_60d 完整。
     # cron 的 day-of-week: 0=Sun, 1=Mon ... 5=Fri, 6=Sat → 1-5 = 週一到週五
     - cron: "0 9 * * 1-5"
   workflow_dispatch:  # 允許手動觸發
 
 # 同時只允許 1 個 run（包含 schedule + manual + auto-retry）：
-# 新 run 進來時若已有在跑，會 queue 等待而非並行，避免 FinMind token 配額對撞。
+# 新 run 進來時若已有在跑，會 queue 等待而非並行，避免同時寫同一份 DB。
 # cancel-in-progress: false → 已在跑的不被砍掉，新的 queue 等
 concurrency:
   group: daily-stock-screen
@@ -87,7 +87,6 @@ jobs:
 
       - name: Run daily screen
         env:
-          FINMIND_TOKEN:       ${{ secrets.FINMIND_TOKEN }}
           TELEGRAM_TOKEN:      ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID:    ${{ secrets.TELEGRAM_CHAT_ID }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}

@@ -138,8 +138,8 @@ def benchmark_0050(start: str, end: str, total_return: bool = True) -> pd.Series
     c = _closes("0050").loc[start:end]
     if not total_return:
         return c / c.iloc[0]
-    from data.fetcher import _finmind
-    div = _finmind("TaiwanStockDividendResult", "0050", "2018-01-01")
+    from data.fetcher import fetch_twse_ex_rights
+    div = fetch_twse_ex_rights("0050", "2018-01-01")
     factor = pd.Series(1.0, index=c.index)
     if div is not None and not div.empty:
         for _, r in div.iterrows():

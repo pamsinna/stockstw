@@ -7,9 +7,6 @@ REPORT_DIR.mkdir(exist_ok=True)
 
 DATA_START = "2018-01-01"  # earliest history kept in cache DB
 
-# FinMind
-FINMIND_API_URL = "https://api.finmindtrade.com/api/v4/data"
-FINMIND_TOKEN = ""  # set in .env
 
 # Telegram
 TELEGRAM_TOKEN = ""   # set in .env

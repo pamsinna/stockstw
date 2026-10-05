@@ -454,28 +454,25 @@ def save_financial(stock_id: str, df: pd.DataFrame) -> None:
         )
 
 
-def stale_financial_stocks(stock_ids: list[str], target_quarter: str,
-                           retry_cutoff: str) -> list[str]:
-    """最新財報季 < target_quarter、且最近（retry_cutoff 之後）沒嘗試過的股票，
-    最舊的排前面（落後最多的先補）。從沒有財報的股票排最後（多半是 ETF／無財報）。"""
+def save_financial_bulk(df: pd.DataFrame) -> None:
+    """多檔財報長表（stock_id, date, type, value）批次寫入，INSERT OR IGNORE（不覆蓋既有）。"""
+    if df.empty:
+        return
+    df = df.copy()
+    df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
     with _conn() as con:
-        latest = dict(con.execute(
-            "SELECT stock_id, MAX(date) FROM financial WHERE type='EPS' GROUP BY stock_id"
-        ).fetchall())
-        tried = dict(con.execute(
-            "SELECT stock_id, last_date FROM fetch_log WHERE dataset='fin_try'"
-        ).fetchall())
-    todo = [s for s in stock_ids
-            if (latest.get(s) or "") < target_quarter
-            and (tried.get(s) or "") < retry_cutoff]
-    return sorted(todo, key=lambda s: (latest.get(s) is None, latest.get(s) or ""))
+        df[["stock_id", "date", "type", "value"]].to_sql(
+            "financial", con, if_exists="append", index=False, method=_insert_or_ignore)
 
 
-def mark_financial_attempt(stock_id: str, day: str) -> None:
-    """記錄財報刷新嘗試日（fetch_log dataset='fin_try'），供重試間隔判斷。"""
+def financial_coverage(date: str, stock_ids: set[str]) -> float:
+    """date 這一季有 EPS 的股票 ÷ 曾經有過財報的追蹤股票（ETF 等本來就沒財報的不算分母）。"""
     with _conn() as con:
-        con.execute("INSERT OR REPLACE INTO fetch_log VALUES (?, 'fin_try', ?)",
-                    (stock_id, day))
+        have = {r[0] for r in con.execute(
+            "SELECT DISTINCT stock_id FROM financial WHERE type='EPS' AND date=?", (date,))}
+        ever = {r[0] for r in con.execute("SELECT DISTINCT stock_id FROM financial WHERE type='EPS'")}
+    base = ever & stock_ids
+    return len(have & base) / len(base) if base else 0.0
 
 
 def load_financial(stock_id: str, type_filter: list[str] | None = None) -> pd.DataFrame:

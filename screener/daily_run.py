@@ -15,22 +15,19 @@ from tqdm import tqdm
 from config import DATA_START
 from data.cache import (
     init_db, load_prices, load_institutional, load_monthly_revenue, load_per,
-    save_prices, save_institutional, save_prices_bulk, save_institutional_bulk,
-    save_monthly_revenue_bulk, save_per_bulk, save_financial,
+    save_prices, save_prices_bulk, save_institutional_bulk,
+    save_monthly_revenue_bulk, save_per_bulk, save_financial_bulk, financial_coverage,
     last_full_market_date, revenue_month_counts,
-    stale_financial_stocks, mark_financial_attempt,
-    last_price_date, last_institutional_date, earliest_last_date_since,
-    mark_fetch_skip, load_shareholding_latest, load_shareholding, save_radar_log,
+    last_price_date, earliest_last_date_since,
+    load_shareholding_latest, load_shareholding, save_radar_log,
     save_shareholding, last_shareholding_date,
     save_futures_inst, last_futures_inst_date,
 )
 from data.universe import build_universe
-from data.fetcher import (fetch_price, fetch_institutional,
-                          fetch_tdcc_shareholding, fetch_futures_inst,
+from data.fetcher import (fetch_tdcc_shareholding, fetch_taifex_futures_inst,
+                          fetch_stock_history, fetch_mops_financials,
                           fetch_all_prices_by_date, fetch_all_inst_by_date,
-                          fetch_mops_monthly_revenue, fetch_all_per_by_date,
-                          fetch_financial_statement, fetch_balance_sheet,
-                          fetch_cash_flow)
+                          fetch_mops_monthly_revenue, fetch_all_per_by_date)
 from backtest.run_backtest import build_market_filter
 from fundamental.quality_filter import batch_fundamentals
 from technical.signals import (
@@ -78,10 +75,10 @@ REV_GAPFILL_MONTHS = 6
 REV_GAPFILL_RATIO = 0.8
 # 本益比 bulk：從「最後一個全市場都有 PER 的日期」補起，最多回補這麼多日曆天。
 PER_BACKFILL_MAX_DAYS = 200
-# 財報滾動刷新：每次最多刷新幾檔（× 3 張表 × 6s FinMind 限速 ≈ 45 分鐘，~8 天輪完 1145 檔）；
-# 同一檔抓過但 FinMind 還沒有新季 → 隔幾天再試，避免天天浪費額度。
-FIN_REFRESH_PER_RUN = 150
-FIN_RETRY_DAYS = 5
+# 期限已過的最新一季：覆蓋率達此比例就不再補抓（剩下的多是延遲申報／無財報）
+FIN_COVERAGE_OK = 0.9
+# 新股深歷史從這天起補（官方個股頁逐月查，一個月一個請求）
+DEEP_HISTORY_START = "2024-01-01"
 # 觀察名單（營收爆發）回看窗：近 20 交易日內觸發過都列，今日新觸發標 🆕
 WATCH_WINDOW = 20
 # 法人佈局雷達顯示／記錄上限（實測近 40 交易日平均每天 ~1 檔、最多 4 檔）
@@ -150,9 +147,17 @@ def update_per(today, keep: set[str]) -> None:
     logger.info(f"PER bulk fill {start}..{today}: {n} rows.")
 
 
+_Q_END = {1: (3, 31), 2: (6, 30), 3: (9, 30), 4: (12, 31)}
+
+
+def _filing_deadline(y: int, q: int):
+    """法定公告期限：Q1→5/15、Q2→8/14、Q3→11/14、年報→隔年 3/31。"""
+    return {1: datetime(y, 5, 15), 2: datetime(y, 8, 14), 3: datetime(y, 11, 14),
+            4: datetime(y + 1, 3, 31)}[q].date()
+
+
 def _latest_due_quarter(today) -> str:
-    """法定期限已過（+5 天緩衝給 FinMind 入庫）的最新一季季底日。
-    Q1→5/15、Q2→8/14、Q3→11/14、年報→隔年 3/31。"""
+    """法定期限已過（+5 天緩衝）的最新一季季底日。"""
     y = today.year
     candidates = [
         (datetime(y, 11, 19).date(), f"{y}-09-30"),
@@ -166,27 +171,99 @@ def _latest_due_quarter(today) -> str:
     return f"{y - 1}-09-30"
 
 
-def refresh_financials(today, all_stocks: list[str]) -> None:
-    """財報滾動刷新：最新季財報缺的股票，每次刷新 FIN_REFRESH_PER_RUN 檔。
+def _quarters_to_refresh(today) -> list[tuple[int, int]]:
+    """(1) 申報期間中的季（季底後 ～ 期限 +5 天）：每天抓，早申報的先進來；
+    (2) 期限已過的最新季：覆蓋率不足才補抓（見 refresh_financials）。"""
+    out = []
+    for y in (today.year - 1, today.year):
+        for q in (1, 2, 3, 4):
+            m, d = _Q_END[q]
+            q_end = datetime(y, m, d).date()
+            if q_end < today <= _filing_deadline(y, q) + timedelta(days=5):
+                out.append((y, q))
+    due = pd.Timestamp(_latest_due_quarter(today))
+    out.append((due.year, (due.month - 1) // 3 + 1))
+    return list(dict.fromkeys(out))
 
-    舊流程只有 bootstrap（download_financial）抓一次，之後永不更新 → 2026Q1
-    只有 312 檔、Q2 0 檔，基本面濾網一直拿 2025Q4 在評分。
+
+def refresh_financials(today, all_stocks: list[str]) -> None:
+    """財報：MOPS 彙總報表（每季上市＋上櫃各 4 個請求涵蓋全市場，含 KY）。
+
+    取代 FinMind 逐檔抓（舊版每天 150 檔 × 3 表 × 6 秒）。申報期間每天重抓該季，
+    INSERT OR IGNORE → 早申報的公司先進來、已存在的不覆蓋。
     """
-    target = _latest_due_quarter(today)
-    retry_cutoff = (today - timedelta(days=FIN_RETRY_DAYS)).isoformat()
-    todo = stale_financial_stocks(all_stocks, target, retry_cutoff)
-    if not todo:
-        logger.info(f"Financials up to date through {target}.")
-        return
-    batch = todo[:FIN_REFRESH_PER_RUN]
-    logger.info(f"Financial refresh: {len(todo)} stocks lack {target}; refreshing {len(batch)}...")
-    fetch_start = (datetime.fromisoformat(target).date() - timedelta(days=400)).isoformat()
-    for sid in tqdm(batch, desc="Financial"):
-        for fn in (fetch_financial_statement, fetch_balance_sheet, fetch_cash_flow):
-            df = fn(sid, fetch_start)  # rate-limited inside _finmind()
-            if df is not None and not df.empty:
-                save_financial(sid, df)
-        mark_financial_attempt(sid, today.isoformat())
+    keep = set(all_stocks)
+    due = _latest_due_quarter(today)
+    for y, q in _quarters_to_refresh(today):
+        m, d = _Q_END[q]
+        date = f"{y}-{m:02d}-{d:02d}"
+        if date == due and financial_coverage(date, keep) >= FIN_COVERAGE_OK:
+            continue
+        df = fetch_mops_financials(y, q)
+        if df.empty:
+            # 申報期間初期還沒人申報是正常的；只有「期限已過」的季抓不到才算異常
+            (logger.warning if date == due else logger.info)(f"MOPS financials {y}Q{q} returned empty")
+            continue
+        df = df[df["stock_id"].isin(keep)]
+        save_financial_bulk(df)
+        logger.info(f"MOPS financials {y}Q{q}: {df['stock_id'].nunique()} stocks; "
+                    f"coverage {financial_coverage(date, keep):.0%}")
+
+
+def _bulk_fill(start, end, keep: set[str], with_per: bool = False) -> None:
+    """官方 bulk 逐日補全市場價量 + 三大法人（with_per 也補本益比）。"""
+    n_price = n_inst = 0
+    for offset in tqdm(range((end - start).days + 1), desc="Bulk"):
+        dt = start + timedelta(days=offset)
+        if dt.weekday() >= 5:  # 週末必非交易日，省一次請求
+            continue
+        diso = dt.isoformat()
+        pdf = fetch_all_prices_by_date(diso)
+        if not pdf.empty:
+            pdf = pdf[pdf["stock_id"].isin(keep)]
+            save_prices_bulk(pdf)
+            n_price += len(pdf)
+        idf = fetch_all_inst_by_date(diso)
+        if not idf.empty:
+            idf = idf[idf["stock_id"].isin(keep)]
+            save_institutional_bulk(idf)
+            n_inst += len(idf)
+        if with_per and not pdf.empty:
+            per = fetch_all_per_by_date(diso)
+            if not per.empty:
+                save_per_bulk(per[per["stock_id"].isin(keep)])
+        time.sleep(0.5)  # 對官方站點客氣一點
+    logger.info(f"Bulk fill done: {n_price} price rows, {n_inst} inst rows.")
+
+
+def bootstrap_official(universe: pd.DataFrame, start: str) -> None:
+    """從零重建資料庫（全部官方來源，免 token）：價量／法人／本益比逐日 bulk、
+    月營收 MOPS 逐月、財報 MOPS 逐季、台指期法人 期交所。約每交易日 4 個請求，
+    2019 起約需 2～3 小時。已存在的資料不覆蓋，可中斷後重跑接續。"""
+    today = datetime.now(_TZ).date()
+    s0 = datetime.fromisoformat(start).date()
+    keep = set(universe["stock_id"]) | {TAIEX_PROXY} | set(_AUX_PRICE_IDS)
+    earliest = earliest_last_date_since("price", start)
+    resume = datetime.fromisoformat(earliest).date() if earliest else s0
+    _bulk_fill(max(s0, resume), today, keep, with_per=True)
+    for m in pd.period_range(pd.Timestamp(s0) - pd.DateOffset(months=24), pd.Timestamp(today), freq="M"):
+        rev = fetch_mops_monthly_revenue(m.year, m.month)
+        if not rev.empty:
+            save_monthly_revenue_bulk(rev[rev["stock_id"].isin(keep)], fetched_date=None)
+    for y in range(s0.year - 2, today.year + 1):
+        for q in (1, 2, 3, 4):
+            m_, d_ = _Q_END[q]
+            if datetime(y, m_, d_).date() >= today:
+                continue
+            fin = fetch_mops_financials(y, q)
+            if not fin.empty:
+                save_financial_bulk(fin[fin["stock_id"].isin(keep)])
+                logger.info(f"Bootstrap financials {y}Q{q}: {fin['stock_id'].nunique()} stocks")
+    for fid in _AUX_FUTURES_IDS:
+        for y in range(s0.year, today.year + 1):
+            df = fetch_taifex_futures_inst(fid, f"{y}-01-01", f"{y}-12-31")
+            if not df.empty:
+                save_futures_inst(fid, df)
 
 
 def incremental_update(universe: pd.DataFrame) -> None:
@@ -194,7 +271,7 @@ def incremental_update(universe: pd.DataFrame) -> None:
     更新所有 universe 內的股票：
     - 價量 + 三大法人：用 TWSE/TPEx 官方 bulk（單一請求回傳全市場單日）補最近
       BULK_LOOKBACK_DAYS 天 → 免 token、無 600/hr 限流、整批一致。
-    - 仍落後超過 bulk 窗的個股（新股 / bootstrap）→ 退回 FinMind 逐檔深歷史。
+    - 仍落後超過 bulk 窗的個股（新股）→ 證交所／櫃買個股歷史頁逐月補價量。
     - 0050（大盤代理）含在 keep 內，確保 last_trading_day 永遠跟上。
     """
     today = datetime.now(_TZ).date()
@@ -211,72 +288,33 @@ def incremental_update(universe: pd.DataFrame) -> None:
     earliest = earliest_last_date_since("price", bulk_floor.isoformat())
     start_active = datetime.fromisoformat(earliest).date() if earliest else bulk_floor
     start = max(min(start_active, min_refetch), bulk_floor)
-    n_days = (today - start).days + 1
     logger.info(f"Bulk fill (TWSE/TPEx official) {start}..{today} "
                 f"for {len(keep)} tracked stocks...")
-    n_price = n_inst = 0
-    for offset in tqdm(range(n_days), desc="Bulk"):
-        dt = start + timedelta(days=offset)
-        if dt.weekday() >= 5:  # 週末必非交易日，省一次請求
-            continue
-        diso = dt.isoformat()
-        pdf = fetch_all_prices_by_date(diso)
-        if not pdf.empty:
-            pdf = pdf[pdf["stock_id"].isin(keep)]
-            save_prices_bulk(pdf)
-            n_price += len(pdf)
-        idf = fetch_all_inst_by_date(diso)
-        if not idf.empty:
-            idf = idf[idf["stock_id"].isin(keep)]
-            save_institutional_bulk(idf)
-            n_inst += len(idf)
-        time.sleep(0.5)  # 對官方站點客氣一點
-    logger.info(f"Bulk fill done: {n_price} price rows, {n_inst} inst rows.")
+    _bulk_fill(start, today, keep)
 
-    # ── 2) FinMind fallback：只補落後超過 bulk 窗的個股（新股 / bootstrap 深歷史）─
+    # ── 2) 官方個股歷史：只補落後超過 bulk 窗的個股（新股），法人歷史不補（只能逐日 bulk）
     floor_str = bulk_floor.isoformat()
+    market_map = dict(zip(universe["stock_id"], universe["market"]))
     deep = [sid for sid in ([TAIEX_PROXY] + all_stocks)
             if (last_price_date(sid) or DATA_START) < floor_str]
     if deep:
-        logger.info(f"FinMind deep-history fallback for {len(deep)} stocks "
-                    f"behind {floor_str}...")
+        logger.info(f"Official per-stock history for {len(deep)} stocks behind {floor_str}...")
     for sid in tqdm(deep, desc="Backfill"):
-        last = last_price_date(sid) or DATA_START
-        price = fetch_price(sid, last)  # rate-limited inside _finmind()
-        if price is None:
-            mark_fetch_skip(sid, "price")
-        elif not price.empty:
-            save_prices(sid, price)
-
-        last_inst = last_institutional_date(sid) or DATA_START
-        if last_inst < floor_str:
-            inst = fetch_institutional(sid, last_inst)  # rate-limited inside _finmind()
-            if inst is None:
-                mark_fetch_skip(sid, "institutional")
-            elif not inst.empty:
-                save_institutional(sid, inst)
+        last = last_price_date(sid) or DEEP_HISTORY_START
+        df = fetch_stock_history(sid, market_map.get(sid, "TWSE"), max(last, DEEP_HISTORY_START))
+        if not df.empty:
+            save_prices(sid, df)
 
     update_monthly_revenue(today, set(all_stocks))
     update_per(today, set(all_stocks))
     refresh_financials(today, all_stocks)
 
-    # Regime gauge 用的衍生資料（0056 + TX 期貨）— sync_db 會覆蓋 local，
-    # 因此每次 incremental_update 都要重新補齊
-    for sid in _AUX_PRICE_IDS:
-        last = last_price_date(sid) or DATA_START
-        if last < today_str:
-            df = fetch_price(sid, last)
-            if df is None:
-                mark_fetch_skip(sid, "price")
-            elif not df.empty:
-                save_prices(sid, df)
-                logger.info(f"Aux price {sid}: updated to {df['date'].max()}")
-
+    # Regime gauge：0056 已在 bulk（keep 含 _AUX_PRICE_IDS）；TX 期貨用期交所官方
     for fid in _AUX_FUTURES_IDS:
         last = last_futures_inst_date(fid) or DATA_START
         if last < today_str:
-            df = fetch_futures_inst(fid, last)
-            if df is not None and not df.empty:
+            df = fetch_taifex_futures_inst(fid, last)
+            if not df.empty:
                 save_futures_inst(fid, df)
                 logger.info(f"Aux futures_inst {fid}: updated to {df['date'].max()}")
 

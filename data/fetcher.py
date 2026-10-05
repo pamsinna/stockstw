@@ -1,9 +1,10 @@
 """
-資料抓取層：整合 TWSE、TPEx 官方 API（免費無限制）+ FinMind（需 token）
-TWSE/TPEx 處理日K和法人籌碼，FinMind 處理財報、月營收、興櫃特有資料
+資料抓取層：只用官方免費來源（2026-10 起完全移除 FinMind）
+- 證交所 TWSE／櫃買 TPEx：日 K、三大法人、本益比、上市櫃清單、個股歷史、除權息
+- 公開資訊觀測站 MOPS：月營收、財報（損益／資產負債／現金流量彙總表）
+- 期交所 TAIFEX：期貨三大法人未平倉；集保 TDCC：股權分散；FRED：美國信用利差
 """
 import io
-import os
 import time
 import logging
 import requests
@@ -14,9 +15,6 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-FINMIND_TOKEN = os.getenv("FINMIND_TOKEN", "")
-FINMIND_URL = "https://api.finmindtrade.com/api/v4/data"
-_RATE_LIMIT_SEC = 6.0  # FinMind free tier: 600 req/hr → 6 s/req
 
 TWSE_BASE = "https://www.twse.com.tw/exchangeReport"
 TPEX_BASE = "https://www.tpex.org.tw/web/stock"
@@ -37,9 +35,6 @@ def _get(url: str, params: dict, retries: int = 3, delay: float = 1.0, timeout: 
             # 403 = 已下市或無權限，永久跳過
             if r.status_code == 403:
                 return _PERM_SKIP
-            # 402 = 可能是暫時限流，回傳空讓下次重試（不寫 9999）
-            if r.status_code == 402:
-                return None
             # 429 = rate limit，等久一點再試
             if r.status_code == 429:
                 time.sleep(60)
@@ -110,112 +105,6 @@ def fetch_tpex_stock_list() -> pd.DataFrame:
     except Exception as e:
         logger.error(f"fetch_tpex_stock_list failed: {e}")
         return pd.DataFrame()
-
-
-# ─── FinMind API ──────────────────────────────────────────────────────────────
-
-def _finmind(dataset: str, stock_id: str, start: str, end: str = "") -> pd.DataFrame | None:
-    """
-    回傳 DataFrame（有或沒有資料）或 None。
-    None = 403 永久跳過，呼叫方應寫入 fetch_log 避免下次重試。
-    """
-    params = {
-        "dataset": dataset,
-        "data_id": stock_id,
-        "start_date": start,
-        "token": FINMIND_TOKEN,
-    }
-    if end:
-        params["end_date"] = end
-    data = _get(FINMIND_URL, params)
-    time.sleep(_RATE_LIMIT_SEC)  # 402/403 也要睡：請求已打出去，需遵守 rate limit
-    if data is _PERM_SKIP:
-        logger.debug(f"FinMind {dataset} {stock_id}: 403 permanent skip")
-        return None
-    if not data or data.get("status") != 200:
-        logger.warning(f"FinMind {dataset} {stock_id}: {data.get('msg') if data else 'no response'}")
-        return pd.DataFrame()
-    df = pd.DataFrame(data.get("data", []))
-    if not df.empty and "date" in df.columns:
-        df["date"] = pd.to_datetime(df["date"])
-    return df
-
-
-def fetch_price(stock_id: str, start: str, end: str = "") -> pd.DataFrame | None:
-    """日K OHLCV。回傳 None 代表 402/403 永久跳過；空 DataFrame 代表暫無資料。"""
-    df = _finmind("TaiwanStockPrice", stock_id, start, end)
-    if df is None:
-        return None
-    if df.empty:
-        return df
-    cols = {"open": "open", "max": "high", "min": "low", "close": "close",
-            "Trading_Volume": "volume", "date": "date"}
-    df = df.rename(columns={k: v for k, v in cols.items() if k in df.columns})
-    needed = ["date", "open", "high", "low", "close", "volume"]
-    existing = [c for c in needed if c in df.columns]
-    return df[existing].sort_values("date").reset_index(drop=True)
-
-
-def fetch_institutional(stock_id: str, start: str, end: str = "") -> pd.DataFrame | None:
-    """三大法人買賣超。回傳 None 代表 402/403 永久跳過。"""
-    df = _finmind("TaiwanStockInstitutionalInvestorsBuySell", stock_id, start, end)
-    if df is None:
-        return None
-    if df.empty:
-        return df
-
-    # FinMind 回傳 buy / sell 分開欄位，買賣超 = buy - sell
-    df["buy_sell"] = pd.to_numeric(df["buy"], errors="coerce") - pd.to_numeric(df["sell"], errors="coerce")
-
-    # 把各法人類別 pivot 成欄位
-    pivot = df.pivot_table(index="date", columns="name", values="buy_sell", aggfunc="sum")
-    pivot.columns.name = None
-    pivot = pivot.reset_index()
-
-    # 外資 = Foreign_Investor，投信 = Investment_Trust，自營 = Dealer_self + Dealer_Hedging
-    foreign = pivot.get("Foreign_Investor", 0)
-    trust   = pivot.get("Investment_Trust", 0)
-    dealer  = pivot.get("Dealer_self", 0) + pivot.get("Dealer_Hedging", 0)
-
-    result = pd.DataFrame({
-        "date":    pivot["date"],
-        "foreign": foreign,
-        "trust":   trust,
-        "dealer":  dealer,
-    })
-    result["date"] = pd.to_datetime(result["date"])
-    return result.sort_values("date").reset_index(drop=True)
-
-
-def fetch_financial_statement(stock_id: str, start: str) -> pd.DataFrame:
-    """綜合損益表（含毛利率、營業利益）"""
-    return _finmind("TaiwanStockFinancialStatements", stock_id, start)
-
-
-def fetch_balance_sheet(stock_id: str, start: str) -> pd.DataFrame:
-    return _finmind("TaiwanStockBalanceSheet", stock_id, start)
-
-
-def fetch_cash_flow(stock_id: str, start: str) -> pd.DataFrame:
-    return _finmind("TaiwanStockCashFlowsStatement", stock_id, start)
-
-
-def fetch_monthly_revenue(stock_id: str, start: str) -> pd.DataFrame:
-    """月營收（用來判斷連續成長）"""
-    return _finmind("TaiwanStockMonthRevenue", stock_id, start)
-
-
-def fetch_per(stock_id: str, start: str) -> pd.DataFrame | None:
-    """每日本益比、股價淨值比、殖利率。回傳 None 代表 402/403 永久跳過。"""
-    df = _finmind("TaiwanStockPER", stock_id, start)
-    if df is None:
-        return None
-    if df.empty:
-        return df
-    df = df.rename(columns={"PER": "per", "PBR": "pbr", "dividend_yield": "div_yield"})
-    needed = ["date", "per", "pbr", "div_yield"]
-    existing = [c for c in needed if c in df.columns]
-    return df[existing].sort_values("date").reset_index(drop=True)
 
 
 # ─── 官方 bulk：單一請求回傳全市場單日資料（免 token、無 600/hr 限流）─────────────
@@ -434,6 +323,209 @@ def fetch_mops_monthly_revenue(year: int, month: int) -> pd.DataFrame:
     return pd.concat(parts, ignore_index=True).drop_duplicates("stock_id")
 
 
+# ─── 財報 bulk（MOPS 彙總報表：損益 t163sb04、資產負債 t163sb05、現金流量 t163sb20）──
+# 每季上市(sii)／上櫃(otc)各一個請求就涵蓋全市場（含 KY）。取代 FinMind 逐檔抓。
+# 損益表與現金流量表是「年初至今累計」；資產負債表是季底時點值。單位仟元（EPS 元）。
+MOPS_FIN_URL = "https://mopsov.twse.com.tw/mops/web/ajax_{ep}"
+# DB financial.type ← MOPS 欄名（不同產業表欄名略有不同，依序找第一個存在的）
+_MOPS_FIN_COLS = {
+    "t163sb04": {
+        "Revenue": ("營業收入", "收入"),
+        "GrossProfit": ("營業毛利（毛損）",),
+        "OperatingIncome": ("營業利益（損失）",),
+        "IncomeAfterTaxes": ("本期淨利（淨損）",),
+        "EPS": ("基本每股盈餘（元）", "基本每股盈餘"),
+    },
+    "t163sb05": {"Equity": ("權益總計", "權益總額")},
+    "t163sb20": {"CashFlowsFromOperatingActivities": ("營業活動之淨現金流入（流出）",)},
+}
+
+
+def _parse_mops_fin_html(html: str, ep: str) -> pd.DataFrame:
+    """MOPS 彙總報表 HTML → 寬表 stock_id + DB type 欄（原始單位，未換算）。"""
+    try:
+        tables = pd.read_html(io.StringIO(html), flavor="lxml")
+    except (ValueError, ImportError):
+        return pd.DataFrame()
+    parts = []
+    for t in tables:
+        cols = [str(c).strip() for c in t.columns]
+        if "公司 代號" not in cols and "公司代號" not in cols:
+            continue
+        t.columns = cols
+        code_col = "公司 代號" if "公司 代號" in cols else "公司代號"
+        out = pd.DataFrame({"stock_id": t[code_col].astype(str).str.strip()})
+        for typ, names in _MOPS_FIN_COLS[ep].items():
+            col = next((n for n in names if n in cols), None)
+            if col is not None:
+                out[typ] = [_num(v) for v in t[col]]
+        parts.append(out)
+    if not parts:
+        return pd.DataFrame()
+    df = pd.concat(parts, ignore_index=True)
+    return df[df["stock_id"].str.fullmatch(r"\d{4}")].drop_duplicates("stock_id")
+
+
+def fetch_mops_statement(ep: str, year: int, quarter: int) -> pd.DataFrame:
+    """單一報表、單季、上市＋上櫃全市場（寬表，原始單位）。"""
+    parts = []
+    for typek in ("sii", "otc"):
+        try:
+            r = _session.post(MOPS_FIN_URL.format(ep=ep), timeout=60, data={
+                "encodeURIComponent": 1, "step": 1, "firstin": 1, "off": 1, "isQuery": "Y",
+                "TYPEK": typek, "year": str(year - 1911), "season": f"{quarter:02d}"})
+            r.encoding = "utf-8"
+            df = _parse_mops_fin_html(r.text, ep)
+        except Exception as e:
+            logger.warning(f"MOPS {ep} {typek} {year}Q{quarter} failed: {e}")
+            continue
+        if not df.empty:
+            parts.append(df)
+        time.sleep(1.0)   # MOPS 對頻繁請求敏感
+    return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+
+
+_FLOW_TYPES = ("Revenue", "GrossProfit", "OperatingIncome", "IncomeAfterTaxes", "EPS")
+
+
+def fetch_mops_financials(year: int, quarter: int) -> pd.DataFrame:
+    """全市場單季財報 → DB 長表（stock_id, date, type, value），格式同既有 financial 表：
+    - 損益類（營收／毛利／營益／稅後淨利／EPS）轉成「單季」：本季累計 − 上季累計（Q1 不用減）
+    - 現金流量維持「年初至今累計」（quality_filter 自己轉 TTM）
+    - 權益為季底時點值；金額 仟元 → 元
+    """
+    q_end = {1: "03-31", 2: "06-30", 3: "09-30", 4: "12-31"}[quarter]
+    date = f"{year}-{q_end}"
+    inc = fetch_mops_statement("t163sb04", year, quarter)
+    bal = fetch_mops_statement("t163sb05", year, quarter)
+    cf = fetch_mops_statement("t163sb20", year, quarter)
+    if inc.empty and bal.empty and cf.empty:
+        return pd.DataFrame()
+    if quarter > 1 and not inc.empty:
+        prev = fetch_mops_statement("t163sb04", year, quarter - 1).set_index("stock_id")
+        cur = inc.set_index("stock_id")
+        common = cur.index.intersection(prev.index)
+        flows = [c for c in _FLOW_TYPES if c in cur.columns and c in prev.columns]
+        cur = cur.loc[common, flows] - prev.loc[common, flows]   # 缺上季累計的公司無法換算 → 不收
+        inc = cur.reset_index()
+    rows = []
+    for df in (inc, bal, cf):
+        if df.empty:
+            continue
+        long = df.melt(id_vars="stock_id", var_name="type", value_name="value").dropna(subset=["value"])
+        long.loc[long["type"] != "EPS", "value"] *= 1000   # 仟元 → 元
+        rows.append(long)
+    out = pd.concat(rows, ignore_index=True)
+    out["date"] = date
+    return out[["stock_id", "date", "type", "value"]]
+
+
+# ─── 期交所：期貨三大法人未平倉（取代 FinMind TaiwanFuturesInstitutionalInvestors）──
+TAIFEX_INST_URL = "https://www.taifex.com.tw/cht/3/futContractsDateDown"
+_TAIFEX_COMMODITY = {"TX": "TXF"}
+_TAIFEX_INST_NAME = {"外資及陸資": "外資", "投信": "投信", "自營商": "自營商"}
+
+
+def fetch_taifex_futures_inst(futures_id: str, start: str, end: str = "") -> pd.DataFrame:
+    """期貨三大法人未平倉（口數）。欄位同舊版：date, institution, long_oi, short_oi, net_oi。"""
+    end = end or pd.Timestamp.today().strftime("%Y-%m-%d")
+    try:
+        r = _session.post(TAIFEX_INST_URL, timeout=30, data={
+            "queryStartDate": pd.Timestamp(start).strftime("%Y/%m/%d"),
+            "queryEndDate": pd.Timestamp(end).strftime("%Y/%m/%d"),
+            "commodityId": _TAIFEX_COMMODITY.get(futures_id, futures_id)})
+        r.encoding = "big5"
+        df = pd.read_csv(io.StringIO(r.text))
+    except Exception as e:
+        logger.warning(f"TAIFEX futures inst {futures_id} failed: {e}")
+        return pd.DataFrame()
+    if df.empty or "身份別" not in df.columns:
+        return pd.DataFrame()
+    out = pd.DataFrame({
+        "date": pd.to_datetime(df["日期"]),
+        "institution": df["身份別"].map(lambda x: _TAIFEX_INST_NAME.get(str(x).strip(), str(x).strip())),
+        "long_oi": pd.to_numeric(df["多方未平倉口數"], errors="coerce"),
+        "short_oi": pd.to_numeric(df["空方未平倉口數"], errors="coerce"),
+    })
+    out["net_oi"] = out["long_oi"] - out["short_oi"]
+    return out.sort_values(["date", "institution"]).reset_index(drop=True)
+
+
+# ─── 證交所：除權息計算結果（TWT49U，取代 FinMind TaiwanStockDividendResult）─────
+
+def fetch_twse_ex_rights(stock_id: str, start: str, end: str = "") -> pd.DataFrame:
+    """上市股票／ETF 除權息前收盤價與參考價（逐年查，回傳 date, before_price, after_price）。"""
+    end_ts = pd.Timestamp(end) if end else pd.Timestamp.today()
+    rows = []
+    for y in range(pd.Timestamp(start).year, end_ts.year + 1):
+        a = max(pd.Timestamp(start), pd.Timestamp(y, 1, 1))
+        b = min(end_ts, pd.Timestamp(y, 12, 31))
+        data = _get("https://www.twse.com.tw/rwd/zh/exRight/TWT49U",
+                    {"response": "json", "startDate": a.strftime("%Y%m%d"), "endDate": b.strftime("%Y%m%d")},
+                    timeout=30)
+        if not data or data is _PERM_SKIP or data.get("stat") != "OK":
+            continue
+        idx = {n: i for i, n in enumerate(data.get("fields") or [])}
+        for r in data.get("data", []):
+            if r[idx["股票代號"]].strip() != stock_id:
+                continue
+            ymd = r[idx["資料日期"]].replace("年", "-").replace("月", "-").replace("日", "")
+            yy, mm, dd = ymd.split("-")
+            rows.append({"date": pd.Timestamp(int(yy) + 1911, int(mm), int(dd)),
+                         "before_price": _num(r[idx["除權息前收盤價"]]),
+                         "after_price": _num(r[idx["除權息參考價"]])})
+        time.sleep(0.5)
+    return pd.DataFrame(rows)
+
+
+# ─── 個股歷史日 K（TWSE STOCK_DAY / TPEx tradingStock，取代 FinMind 逐檔深歷史）──
+
+def _roc_date(s: str) -> str:
+    y, m, d = s.strip().split("/")
+    return f"{int(y) + 1911:04d}-{int(m):02d}-{int(d):02d}"
+
+
+def fetch_stock_history_month(stock_id: str, market: str, year: int, month: int) -> pd.DataFrame:
+    """單檔單月日 K。market: TWSE / TPEx。成交量單位：股。"""
+    if market == "TPEx":
+        data = _get(f"{TPEX_WWW}/afterTrading/tradingStock",
+                    {"code": stock_id, "date": f"{year}/{month:02d}/01", "response": "json"}, timeout=30)
+        if not data or data is _PERM_SKIP or str(data.get("stat", "")).lower() != "ok":
+            return pd.DataFrame()
+        t = (data.get("tables") or [{}])[0]
+        idx = {n.replace(" ", ""): i for i, n in enumerate(t.get("fields") or [])}
+        rows = [{"date": _roc_date(r[idx["日期"]]), "open": _num(r[idx["開盤"]]), "high": _num(r[idx["最高"]]),
+                 "low": _num(r[idx["最低"]]), "close": _num(r[idx["收盤"]]),
+                 "volume": (_num(r[idx["成交張數"]]) or 0) * 1000} for r in t.get("data") or []]
+    else:
+        data = _get(f"{TWSE_BASE}/STOCK_DAY",
+                    {"response": "json", "date": f"{year}{month:02d}01", "stockNo": stock_id}, timeout=30)
+        if not data or data is _PERM_SKIP or data.get("stat") != "OK":
+            return pd.DataFrame()
+        idx = {n: i for i, n in enumerate(data.get("fields") or [])}
+        rows = [{"date": _roc_date(r[idx["日期"]]), "open": _num(r[idx["開盤價"]]), "high": _num(r[idx["最高價"]]),
+                 "low": _num(r[idx["最低價"]]), "close": _num(r[idx["收盤價"]]),
+                 "volume": _num(r[idx["成交股數"]])} for r in data.get("data") or []]
+    df = pd.DataFrame(rows)
+    return df.dropna(subset=["close"]) if not df.empty else df
+
+
+def fetch_stock_history(stock_id: str, market: str, start: str, end: str = "") -> pd.DataFrame:
+    """單檔 start～end 日 K（逐月查官方個股頁）。"""
+    end_ts = pd.Timestamp(end) if end else pd.Timestamp.today()
+    parts = []
+    for m in pd.period_range(pd.Timestamp(start), end_ts, freq="M"):
+        df = fetch_stock_history_month(stock_id, market, m.year, m.month)
+        if not df.empty:
+            parts.append(df)
+        time.sleep(0.5)
+    if not parts:
+        return pd.DataFrame()
+    df = pd.concat(parts, ignore_index=True)
+    df = df[(df["date"] >= pd.Timestamp(start).strftime("%Y-%m-%d")) & (df["date"] <= end_ts.strftime("%Y-%m-%d"))]
+    return df.drop_duplicates("date").reset_index(drop=True)
+
+
 # ─── 本益比 bulk（TWSE BWIBBU_d + TPEx peQryDate，可指定歷史日期）─────────────
 
 def _per_num(s) -> float:
@@ -528,59 +620,6 @@ def us_credit_stress_summary() -> str:
         elif chg <= -0.5:
             trend = f"，月內收斂 {chg:.1f}"
     return f"🌡 美國信用壓力(HY OAS)：{cur:.2f}%  {band}{trend}"
-
-
-def fetch_stock_list_finmind() -> pd.DataFrame:
-    """FinMind 股票清單（含興櫃）"""
-    params = {"dataset": "TaiwanStockInfo", "token": FINMIND_TOKEN}
-    data = _get(FINMIND_URL, params)
-    if not data or data.get("status") != 200:
-        return pd.DataFrame()
-    df = pd.DataFrame(data.get("data", []))
-    return df
-
-
-def fetch_emerging_stock_list() -> pd.DataFrame:
-    """興櫃股票清單（透過 FinMind TaiwanStockInfo 過濾）"""
-    df = fetch_stock_list_finmind()
-    if df.empty or "type" not in df.columns:
-        return pd.DataFrame()
-    emerging = df[df["type"].str.contains("興櫃", na=False)].copy()
-    emerging["market"] = "Emerging"
-    rename = {"stock_id": "stock_id", "stock_name": "stock_name", "industry_category": "industry"}
-    emerging = emerging.rename(columns={k: v for k, v in rename.items() if k in emerging.columns})
-    needed = ["stock_id", "stock_name", "market", "industry"]
-    existing = [c for c in needed if c in emerging.columns]
-    return emerging[existing].reset_index(drop=True)
-
-
-def fetch_futures_inst(futures_id: str, start: str, end: str = "") -> pd.DataFrame | None:
-    """期貨三大法人未平倉。回傳含三家法人（外資/投信/自營商）的長表。"""
-    df = _finmind("TaiwanFuturesInstitutionalInvestors", futures_id, start, end)
-    if df is None:
-        return None
-    if df.empty:
-        return df
-
-    long_oi = pd.to_numeric(df["long_open_interest_balance_volume"], errors="coerce")
-    short_oi = pd.to_numeric(df["short_open_interest_balance_volume"], errors="coerce")
-    out = pd.DataFrame({
-        "date": df["date"],
-        "institution": df["institutional_investors"],
-        "long_oi": long_oi,
-        "short_oi": short_oi,
-        "net_oi": long_oi - short_oi,
-    })
-    out["date"] = pd.to_datetime(out["date"])
-    return out.sort_values(["date", "institution"]).reset_index(drop=True)
-
-
-def rate_limit_sleep(n_stocks: int, req_per_stock: int = 3) -> None:
-    """估算需要 sleep 多少秒以不超過 600 req/hr"""
-    total = n_stocks * req_per_stock
-    if total > 500:
-        per_req = 3600 / 600  # 6 秒/請求
-        logger.info(f"Throttling: {total} requests estimated, sleeping {per_req:.1f}s/req")
 
 
 # ─── TDCC 集保結算所：千張大戶週報 ─────────────────────────────────────────────
