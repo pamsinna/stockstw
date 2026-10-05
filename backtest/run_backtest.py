@@ -13,10 +13,10 @@ from tqdm import tqdm
 from data.cache import (
     init_db, load_prices, load_institutional,
     save_prices, save_institutional, save_monthly_revenue, last_price_date,
-    load_monthly_revenue, last_revenue_date, mark_fetch_skip,
-    save_per, last_per_date, load_per, save_financial,
+    last_revenue_date, mark_fetch_skip,
+    save_per, last_per_date, save_financial,
 )
-from fundamental.quality_filter import batch_fundamentals
+from backtest.pit_signals import strategy_signals
 from data.universe import build_universe
 from data.fetcher import (fetch_price, fetch_institutional, fetch_monthly_revenue,
                           fetch_per, fetch_financial_statement, fetch_balance_sheet,
@@ -263,11 +263,6 @@ def run_all_strategies(universe: pd.DataFrame,
 
     market_map = dict(zip(universe["stock_id"], universe["market"]))
 
-    # 基本面篩選（注意：使用最新財報，非歷史快照，有輕微前視偏差）
-    fund_df = batch_fundamentals(stocks)
-    fund_ok = set(fund_df[fund_df["passes_filter"]]["stock_id"])
-    logger.info(f"Fundamental filter: {len(fund_ok)}/{len(stocks)} stocks pass")
-
     # 大盤過濾：寬鬆版（策略一～三、五），嚴格版（策略四專用）
     market_filter = build_market_filter(start, end)
     strict_market_filter = build_market_filter(start, end, strict=True)
@@ -282,62 +277,13 @@ def run_all_strategies(universe: pd.DataFrame,
 
     for strategy in STRATEGIES:
         name       = strategy["name"]
-        signal_fn  = strategy["signal_fn"]
         signal_col = strategy["signal_col"]
         tp = strategy["default_tp"]
         sl = strategy["default_sl"]
         mh = strategy["default_hold"]
 
-        price_map: dict[str, pd.DataFrame] = {}
-        logger.info(f"Preparing signals for [{name}]...")
-
-        needs_rev   = strategy.get("needs_revenue", False)
-        needs_per   = strategy.get("needs_per", False)
-        needs_fund  = strategy.get("needs_fundamental", False)
-        use_strict  = strategy.get("strict_market", False)
-        active_mf   = strict_market_filter if use_strict else market_filter
-
-        # 散戶比例上限 filter（用最新一週 TDCC shareholding 快照）
-        retail_max = strategy.get("retail_max_pct")
-        retail_ok: set[str] | None = None
-        if retail_max is not None:
-            from data.cache import load_shareholding_latest
-            sh = load_shareholding_latest()
-            retail_ok = set(sh[sh["retail_pct"] <= retail_max]["stock_id"])
-            logger.info(f"  Retail filter ≤ {retail_max}%: {len(retail_ok)} stocks pass")
-
-        for sid in tqdm(stocks, desc=name, leave=False):
-            if needs_fund and sid not in fund_ok:
-                continue
-            if retail_ok is not None and sid not in retail_ok:
-                continue
-            price = load_prices(sid, start=DATA_START, end=end)
-            if len(price) < 60:  # 資料太少跳過
-                continue
-            inst = load_institutional(sid, start=DATA_START)
-            extra: dict = {}
-            if needs_rev:
-                rev = load_monthly_revenue(sid)
-                extra["rev_df"] = rev if not rev.empty else None
-            if needs_per:
-                per = load_per(sid, start=DATA_START, end=end)
-                extra["per_df"] = per if not per.empty else None
-            if "inst_threshold" in strategy:
-                extra["inst_threshold"] = strategy["inst_threshold"]
-            if "rev_growth_min" in strategy:
-                extra["rev_growth_min"] = strategy["rev_growth_min"]
-            if "aqs_min" in strategy:
-                extra["aqs_min"] = strategy["aqs_min"]
-            try:
-                df = signal_fn(
-                    price,
-                    inst_df=inst if not inst.empty else None,
-                    market_filter=active_mf if not active_mf.empty else None,
-                    **extra,
-                )
-                price_map[sid] = df
-            except Exception as e:
-                logger.debug(f"{sid} signal error: {e}")
+        logger.info(f"Preparing signals for [{name}] (point-in-time filters)...")
+        price_map = strategy_signals(strategy, stocks, end, market_filter, strict_market_filter)
 
         if not price_map:
             logger.warning(f"No data for strategy {name}")

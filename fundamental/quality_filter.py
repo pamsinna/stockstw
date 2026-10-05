@@ -13,14 +13,45 @@ logger = logging.getLogger(__name__)
 
 # ─── 單股基本面計算 ───────────────────────────────────────────────────────────
 
-def calc_fundamentals(stock_id: str) -> dict:
+def financial_available_date(q_end: pd.Timestamp) -> pd.Timestamp:
+    """財報「可取得日」＝法定公告期限（保守）：Q1→5/15、Q2→8/14、Q3→11/14、年報→隔年 3/31。"""
+    q_end = pd.Timestamp(q_end)
+    y, m = q_end.year, q_end.month
+    if m == 3:
+        return pd.Timestamp(y, 5, 15)
+    if m == 6:
+        return pd.Timestamp(y, 8, 14)
+    if m == 9:
+        return pd.Timestamp(y, 11, 14)
+    if m == 12:
+        return pd.Timestamp(y + 1, 3, 31)
+    return q_end + pd.Timedelta(days=90)
+
+
+def _point_in_time(fin: pd.DataFrame, rev: pd.DataFrame, asof) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """只留 asof 當下已公告的財報／月營收（月營收：申報月 10 日）。"""
+    asof = pd.Timestamp(asof)
+    if not fin.empty:
+        avail = pd.to_datetime(fin["date"]).map(financial_available_date)
+        fin = fin[avail <= asof]
+    if not rev.empty:
+        rev = rev[pd.to_datetime(rev["date"]) + pd.Timedelta(days=9) <= asof]
+    return fin, rev
+
+
+def calc_fundamentals(stock_id: str, asof=None,
+                      fin: pd.DataFrame | None = None,
+                      rev: pd.DataFrame | None = None) -> dict:
     """
-    回傳該股票最新的基本面評分字典。
+    回傳該股票的基本面評分字典。asof=None 用最新資料（每日選股）；
+    給日期則只用當時已公告的財報（回測用，避免拿未來財報判斷過去）。
     鍵值：eps_ttm, roe, gross_margin, op_margin, ocf_ratio,
            eps_growth_q, revenue_growth_m, quality_score, passes_filter
     """
-    fin = load_financial(stock_id)
-    rev = load_monthly_revenue(stock_id)
+    fin = load_financial(stock_id) if fin is None else fin
+    rev = load_monthly_revenue(stock_id) if rev is None else rev
+    if asof is not None:
+        fin, rev = _point_in_time(fin, rev, asof)
 
     result = {
         "stock_id": stock_id,
@@ -244,6 +275,31 @@ def rank_by_industry(universe: pd.DataFrame,
     )
     df["is_top_n_industry"] = df["industry_rank"] <= top_n
     return df
+
+
+def fundamental_pass_timeline(stock_id: str) -> pd.Series:
+    """每次新財報公告後的 passes_filter（index = 可取得日）。回測用：
+    訊號日 d 的基本面狀態 = timeline 中 ≤ d 的最後一筆（之前沒有 → 不通過）。
+
+    舊回測一律用「最新財報」判斷整段歷史 = 前視偏差（例：6933 用 2026 Q2 財報
+    才通過，卻會讓它 2023 年的訊號也算通過）。"""
+    fin = load_financial(stock_id)
+    rev = load_monthly_revenue(stock_id)
+    if fin.empty:
+        return pd.Series(dtype=bool)
+    dates = sorted({financial_available_date(d) for d in pd.to_datetime(fin["date"]).unique()})
+    return pd.Series({d: bool(calc_fundamentals(stock_id, asof=d, fin=fin, rev=rev)["passes_filter"])
+                      for d in dates})
+
+
+def pit_mask(dates: pd.Series, timeline: pd.Series) -> pd.Series:
+    """把 timeline（日期→bool）對齊到 dates：取 ≤ 該日的最後一筆，沒有就 False。"""
+    if timeline is None or timeline.empty:
+        return pd.Series(False, index=dates.index)
+    tl = timeline.sort_index()
+    pos = tl.index.searchsorted(pd.to_datetime(dates).values, side="right") - 1
+    vals = tl.to_numpy()
+    return pd.Series([bool(vals[p]) if p >= 0 else False for p in pos], index=dates.index)
 
 
 def batch_fundamentals(stock_ids: list[str]) -> pd.DataFrame:

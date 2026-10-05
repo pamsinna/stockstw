@@ -50,3 +50,32 @@ def test_ocf_ratio_negative_cash_burn():
 def test_ocf_ratio_loss_and_burn_marked_negative():
     fin = _fin([("2025-12-31", -5)], [(d, -1) for d, _ in NI4])
     assert _calc_ocf_ratio(fin)["ocf_ratio"] == -1.0
+
+
+# ─── point-in-time：回測只能用當時已公告的財報（2026-10 修正前視偏差）──────────
+
+import pytest  # noqa: E402
+
+from fundamental.quality_filter import calc_fundamentals, financial_available_date, pit_mask  # noqa: E402
+
+
+@pytest.mark.parametrize("q,avail", [("2026-03-31", "2026-05-15"), ("2026-06-30", "2026-08-14"),
+                                     ("2026-09-30", "2026-11-14"), ("2025-12-31", "2026-03-31")])
+def test_financial_available_date(q, avail):
+    assert financial_available_date(pd.Timestamp(q)) == pd.Timestamp(avail)
+
+
+def test_pit_mask_uses_last_known_and_false_before_first():
+    tl = pd.Series({pd.Timestamp("2026-05-15"): True, pd.Timestamp("2026-08-14"): False})
+    dates = pd.Series(pd.to_datetime(["2026-05-14", "2026-05-15", "2026-08-13", "2026-08-14"]))
+    assert pit_mask(dates, tl).tolist() == [False, True, True, False]
+
+
+def test_calc_fundamentals_asof_ignores_unpublished_quarters():
+    q = ["2025-03-31", "2025-06-30", "2025-09-30", "2025-12-31", "2026-03-31"]
+    rows = [{"date": d, "type": "EPS", "value": v} for d, v in zip(q, [1, 1, 1, 1, 9])]
+    fin = pd.DataFrame(rows)
+    empty = pd.DataFrame(columns=["date", "revenue", "revenue_yoy"])
+    before = calc_fundamentals("X", asof="2026-05-14", fin=fin, rev=empty)   # Q1 2026 尚未公告
+    after = calc_fundamentals("X", asof="2026-05-15", fin=fin, rev=empty)
+    assert before["eps_ttm"] == 4 and after["eps_ttm"] == 12
