@@ -19,11 +19,12 @@ import pandas as pd
 from data.cache import (load_prices, load_institutional, load_shareholding,
                         load_universe, load_open_signals, save_open_signals)
 from analysis.aqs import compute_aqs
+from technical.signals import RULES_VERSION
 
 logger = logging.getLogger(__name__)
 
 _COLS = ["entry_date", "stock_id", "name", "strategy", "entry_price",
-         "status", "alert_level", "exit_date", "exit_reason", "pnl_pct"]
+         "status", "alert_level", "exit_date", "exit_reason", "pnl_pct", "rules_version"]
 
 # signals dict key → 策略標籤
 _TF2STRAT = {"long": "S4", "revenue": "S5", "growth": "S6",
@@ -96,7 +97,8 @@ def record_today(signals: dict[str, pd.DataFrame], date: str) -> None:
                         "name": names.get(sid, ""), "strategy": strat,
                         "entry_price": float(r.get("close", 0) or 0),
                         "status": "open", "alert_level": "none",
-                        "exit_date": "", "exit_reason": "", "pnl_pct": ""})
+                        "exit_date": "", "exit_reason": "", "pnl_pct": "",
+                        "rules_version": RULES_VERSION})
     if new:
         _save(pd.concat([log, pd.DataFrame(new)], ignore_index=True))
         logger.info(f"Exit monitor: recorded {len(new)} new signals to track")

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+from functools import lru_cache
 
 import pandas as pd
 
@@ -16,6 +17,9 @@ from data.cache import (load_prices, load_institutional, load_monthly_revenue, l
 from fundamental.quality_filter import fundamental_pass_timeline, pit_mask
 
 logger = logging.getLogger(__name__)
+
+# 多個策略共用同一檔的基本面時間軸（回測流程內財報不會變）
+_fund_timeline = lru_cache(maxsize=4096)(fundamental_pass_timeline)
 
 
 def retail_pit_mask(stock_id: str, dates: pd.Series, retail_max: float) -> pd.Series:
@@ -64,7 +68,7 @@ def strategy_signals(strategy: dict, stocks: list[str], end: str,
             out[sid] = df
             continue
         if gate:
-            df[col] = df[col] & pit_mask(df["date"], fundamental_pass_timeline(sid))
+            df[col] = df[col] & pit_mask(df["date"], _fund_timeline(sid))
         if retail_max is not None:
             df[col] = df[col] & retail_pit_mask(sid, df["date"], retail_max)
         out[sid] = df

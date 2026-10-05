@@ -236,3 +236,36 @@ def test_stop_loss_gap_down_fills_at_open(handcrafted_price_with_signal):
     trade = result.trades[0]
     assert trade.exit_reason == "stop_loss"
     assert trade.exit_price == pytest.approx(80.0)
+
+
+# ─── 投資組合層回測（backtest.portfolio.simulate）─────────────────────────────
+
+def _trade(sid, entry, exit_, ep, xp, mom=0.0):
+    return {"strategy": "S4", "stock_id": sid, "market": "TWSE", "signal_date": pd.Timestamp(entry),
+            "entry_date": pd.Timestamp(entry), "entry_price": ep, "exit_date": pd.Timestamp(exit_),
+            "exit_price": xp, "exit_reason": "x", "pnl_pct": 0.0, "mom20": mom}
+
+
+def test_portfolio_respects_position_cap_and_momentum_priority(monkeypatch):
+    import backtest.portfolio as pf
+    days = pd.bdate_range("2026-01-05", periods=10)
+    closes = {s: pd.Series(100.0, index=days) for s in ("0050", "A", "B", "C")}
+    monkeypatch.setattr(pf, "_closes", lambda sid: closes[sid])
+    tr = pd.DataFrame([_trade("A", days[1], days[5], 100, 110, mom=0.1),
+                       _trade("B", days[1], days[5], 100, 110, mom=0.3),
+                       _trade("C", days[1], days[5], 100, 110, mom=0.2)])
+    eq, taken = pf.simulate(tr, str(days[0].date()), str(days[-1].date()), max_positions=2)
+    assert set(taken["stock_id"]) == {"B", "C"}                      # 只能 2 檔 → 動能前 2
+    cost = (1 + pf.FEE_RATE_BUY)
+    expect = 1 - 2 * 0.5 + 2 * 0.5 / cost * 1.10 * (1 - pf.FEE_RATE_SELL - pf.TAX_TWSE_OTC)
+    assert eq["equity"].iloc[-1] == pytest.approx(expect)
+
+
+def test_portfolio_no_duplicate_stock_across_strategies(monkeypatch):
+    import backtest.portfolio as pf
+    days = pd.bdate_range("2026-01-05", periods=10)
+    closes = {s: pd.Series(100.0, index=days) for s in ("0050", "A")}
+    monkeypatch.setattr(pf, "_closes", lambda sid: closes[sid])
+    tr = pd.DataFrame([_trade("A", days[1], days[5], 100, 110), _trade("A", days[1], days[6], 100, 120)])
+    _, taken = pf.simulate(tr, str(days[0].date()), str(days[-1].date()), max_positions=5)
+    assert len(taken) == 1
