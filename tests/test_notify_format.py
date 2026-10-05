@@ -171,3 +171,22 @@ def test_radar_scorecard_dedups_repeat_listings():
     log = pd.DataFrame({"date": [days[0], days[1], days[5], days[25]], "stock_id": ["A", "A", "B", "A"]})
     ep = rs.episodes(log, days)
     assert list(zip(ep["stock_id"], ep["date"])) == [("A", days[0]), ("B", days[5]), ("A", days[25])]
+
+
+def test_errors_never_log_bot_token(monkeypatch, caplog):
+    monkeypatch.setattr(tg, "TOKEN", "123:SECRET")
+    monkeypatch.setattr(tg, "CHAT_IDS", ["1"])
+    monkeypatch.setattr(tg, "API_URL", "https://api.telegram.org/bot123:SECRET")
+
+    def boom(url, **kw):
+        raise RuntimeError(f"400 Client Error for url: {url}/sendMessage")
+    monkeypatch.setattr(tg.requests, "post", boom)
+    assert tg.send_message("x") is False
+    assert "SECRET" not in caplog.text and "***" in caplog.text
+
+
+def test_rules_message_is_valid_telegram_html():
+    import re
+    txt = tg.rules_message()
+    # 只允許 <b> <i> 標籤；其他「<」會讓 Telegram 整則 400
+    assert not re.search(r"<(?!/?[bi]>)", txt)

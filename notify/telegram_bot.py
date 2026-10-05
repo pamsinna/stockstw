@@ -26,6 +26,21 @@ TF_LABEL = {
 }
 
 
+def _redact(e) -> str:
+    """錯誤訊息裡的 requests 例外會帶完整網址 = bot token → 一律遮蔽再寫 log。
+    （GitHub Actions log 若公開，token 外洩就能冒用 bot 發訊息。）"""
+    msg = str(e)
+    return msg.replace(TOKEN, "***") if TOKEN else msg
+
+
+def _tg_error(r) -> str:
+    """Telegram 回 4xx 時的 description（例：HTML 解析失敗），比狀態碼有用。"""
+    try:
+        return f"{r.status_code} {r.json().get('description', '')}"
+    except Exception:
+        return str(getattr(r, "status_code", "?"))
+
+
 def send_message(text: str) -> bool:
     if not TOKEN or not CHAT_IDS:
         logger.warning("Telegram not configured (TOKEN or CHAT_ID missing)")
@@ -38,9 +53,11 @@ def send_message(text: str) -> bool:
                 json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
                 timeout=10,
             )
-            r.raise_for_status()
+            if not r.ok:
+                logger.error(f"Telegram send failed (chat_id={chat_id}): {_tg_error(r)}")
+                ok = False
         except Exception as e:
-            logger.error(f"Telegram send failed (chat_id={chat_id}): {e}")
+            logger.error(f"Telegram send failed (chat_id={chat_id}): {_redact(e)}")
             ok = False
     return ok
 
@@ -418,7 +435,7 @@ def rules_message() -> str:
         "\n⭐ = 兩個以上策略同時看好（回測只有 S4+S7 證實勝率較高：66% vs 57%）",
         "S4* = 該策略不是今天、而是近 20 個交易日內觸發過",
         "動能 = 近 20 日漲跌；⚠️未表態 = 價格還沒動，可跳過",
-        "🎯 法人佈局雷達 = 投信連買≥3天＋營收年增≥15%＋投信進場後漲<8%、近20日超額−3～+5%、"
+        "🎯 法人佈局雷達 = 投信連買≥3天＋營收年增≥15%＋投信進場後漲＜8%、近20日超額−3～+5%、"
         "距52週高5～20%、站上季線、散戶沒增加。條件凍結、前瞻追蹤中，不是進場訊號",
         "👀 營收爆發觀察 = 不是進場訊號，題材與時機自己判斷",
         "🚨 出場 = 系統發過的訊號觸及上面的停損／停利／移動停利／天數（與回測同一套規則；不是你的持股）",
@@ -440,7 +457,10 @@ def send_rules(pin: bool = True) -> bool:
             r = requests.post(f"{API_URL}/sendMessage",
                               json={"chat_id": chat_id, "text": rules_message(), "parse_mode": "HTML"},
                               timeout=10)
-            r.raise_for_status()
+            if not r.ok:
+                logger.error(f"Telegram rules send failed (chat_id={chat_id}): {_tg_error(r)}")
+                ok = False
+                continue
             if pin:
                 mid = r.json()["result"]["message_id"]
                 p = requests.post(f"{API_URL}/pinChatMessage",
@@ -449,7 +469,7 @@ def send_rules(pin: bool = True) -> bool:
                 if not p.ok:
                     logger.warning(f"Pin failed (chat_id={chat_id}): {p.text[:200]}")
         except Exception as e:
-            logger.error(f"Telegram rules send failed (chat_id={chat_id}): {e}")
+            logger.error(f"Telegram rules send failed (chat_id={chat_id}): {_redact(e)}")
             ok = False
     return ok
 

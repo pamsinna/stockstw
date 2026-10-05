@@ -60,7 +60,8 @@ def send_message(text: str) -> bool:
             )
             r.raise_for_status()
         except Exception as e:
-            logger.error(f"Discord send failed: {e}")
+            # 例外訊息含完整 webhook URL（= 憑證）→ 遮蔽
+            logger.error(f"Discord send failed: {str(e).replace(WEBHOOK_URL, '***')}")
             ok = False
         time.sleep(0.3)  # webhook rate limit ~5 req/2s，保守一點
     return ok
