@@ -30,7 +30,7 @@ jobs:
       - name: Import smoke test
         run: |
           python -c "from data.cache import init_db, load_prices, save_prices; print('cache OK')"
-          python -c "from data.fetcher import fetch_price, fetch_institutional; print('fetcher OK')"
+          python -c "from data.fetcher import fetch_all_prices_by_date, fetch_all_inst_by_date, fetch_mops_financials, fetch_taifex_futures_inst; print('fetcher OK')"
           python -c "from data.universe import build_universe; print('universe OK')"
           python -c "from technical.signals import STRATEGIES, signal_short_vol_breakout; print(f'signals OK ({len(STRATEGIES)} strategies)')"
           python -c "from technical.indicators import add_all, merge_institutional; print('indicators OK')"
