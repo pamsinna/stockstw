@@ -23,6 +23,7 @@ from backtest.portfolio import benchmark_0050  # noqa: E402
 from config import FEE_RATE_BUY, FEE_RATE_SELL, TAX_TWSE_OTC  # noqa: E402
 from data.cache import load_prices, load_radar_log  # noqa: E402
 from technical.signals import LAYOUT_RULES_VERSION, FOREIGN_LAYOUT_RULES_VERSION  # noqa: E402
+from analysis import significance as sg  # noqa: E402
 
 VARIANTS = {"trust": ("🎯 投信版", LAYOUT_RULES_VERSION),
             "foreign": ("🌐 外資版", FOREIGN_LAYOUT_RULES_VERSION)}
@@ -79,10 +80,20 @@ def scorecard(variant: str = "trust") -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+PRIMARY_H = 20   # 事先指定的主要評估期（雷達 vs 0050 的 20 日超額）；60 日僅供參考
+
+
+def excess(df: pd.DataFrame, h: int) -> tuple:
+    x = df.dropna(subset=[f"{h}d%"])
+    return (x[f"{h}d%"] - x[f"0050_{h}d%"]).to_numpy(), sg.week_key(x["date"])
+
+
 def main() -> None:
     logging.basicConfig(level=logging.WARNING)
+    cards = {}
     for variant, (label, ver) in VARIANTS.items():
         df = scorecard(variant)
+        cards[variant] = df
         print(f"\n{label}法人佈局雷達成績單 — {ver}")
         if df.empty:
             print("  尚無資料（名單從規則凍結後開始累積）")
@@ -96,6 +107,16 @@ def main() -> None:
             ex = x[f"{h}d%"] - x[f"0050_{h}d%"]
             print(f"  {h} 日：已到期 {len(x)} 筆｜平均 {x[f'{h}d%'].mean():+.2f}%  中位數 {x[f'{h}d%'].median():+.2f}%"
                   f"｜同期 0050 {x[f'0050_{h}d%'].mean():+.2f}%｜超額平均 {ex.mean():+.2f}%  贏 0050 比例 {(ex > 0).mean()*100:.0f}%")
+            tag = "（主要指標）" if h == PRIMARY_H else "（參考）"
+            print(f"     {tag}{sg.fmt(sg.verdict(*excess(df, h)))}")
+    a, b = cards.get("trust"), cards.get("foreign")
+    if a is not None and b is not None and not a.empty and not b.empty:
+        ea, ca = excess(a, PRIMARY_H)
+        eb, cb = excess(b, PRIMARY_H)
+        if len(ea) >= 2 and len(eb) >= 2:
+            d, p = sg.welch_compare(ea, ca, eb, cb)
+            print(f"\n投信版 vs 外資版（{PRIMARY_H} 日超額）：差 {d:+.2f}%，"
+                  f"差異是運氣的機率 {p:.1%}{'（顯著）' if p < 0.05 else '（還分不出來）'}")
 
 
 if __name__ == "__main__":

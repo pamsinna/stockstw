@@ -22,6 +22,7 @@ from backtest.portfolio import benchmark_0050  # noqa: E402
 from data.cache import load_open_signals  # noqa: E402
 from notify.exit_monitor import rule_status  # noqa: E402
 from technical.signals import RULES_VERSION, RULES_FROZEN_SINCE  # noqa: E402
+from analysis import significance as sg  # noqa: E402
 
 
 def scorecard(include_all: bool = False) -> pd.DataFrame:
@@ -60,6 +61,14 @@ def summarize(df: pd.DataFrame) -> pd.DataFrame:
     return out.round(1)
 
 
+def significance(df: pd.DataFrame) -> dict[str, sg.Verdict]:
+    """每個策略：超額報酬（vs 同期 0050）是不是運氣——以進場週分組檢定。"""
+    out = {}
+    for strat, g in list(df.groupby("strategy")) + [("合計", df)]:
+        out[strat] = sg.verdict((g["ret%"] - g["0050%"]).to_numpy(), sg.week_key(g["entry_date"]))
+    return out
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--all", action="store_true")
@@ -73,6 +82,14 @@ def main() -> None:
     pd.set_option("display.width", 200)
     print(f"實盤成績單 — {label}")
     print(summarize(df).to_string())
+    print("\n是不是運氣（超額 vs 0050 含息，以進場週分組檢定）")
+    for strat, v in significance(df).items():
+        print(f"  {strat}: {sg.fmt(v)}")
+    print("\n連虧心理準備（照目前勝率，未來 50 筆內至少連虧 8 次的機率）")
+    for strat, g in df.groupby("strategy"):
+        if len(g) >= 10:
+            wr = float((g["ret%"] > 0).mean())
+            print(f"  {strat}: 勝率 {wr:.0%} → {sg.losing_streak_prob(50, 8, wr):.0%}")
 
 
 if __name__ == "__main__":
